@@ -129,7 +129,13 @@ namespace Psycho.TradeLanes
         double TradeLaneHeadingMarkerDistance = 550;
 
         // 25000f
-        float SuperluminalSpeed = 100000f;   // 1000
+        // Lanes used to cross at half the configured speed, 100000 gave about 50 km/s
+        const float DefaultSuperluminalSpeed = 50000f;
+        float SuperluminalSpeed = DefaultSuperluminalSpeed;   // 1000
+
+        string TradeLaneRingIntervalKeyword = "RingInterval";
+        const float DefaultRingInterval = 10000f; // m
+        float RingInterval = DefaultRingInterval;
         bool UseTeleport = true;
 
         //float RingRotationSpeed = 5;
@@ -1037,7 +1043,7 @@ namespace Psycho.TradeLanes
                 var distnace = Vector3D.Distance(Block.WorldMatrix.Translation, TargetPosition);
 
                 var kilometers = distnace / 1000f;
-                int ringEveryKm = 7; // Roughly set a TL ring every X kilometers.
+                float ringEveryKm = RingInterval / 1000f; // Roughly set a TL ring every X kilometers.
 
                 if (distnace >= ringEveryKm)
                 {
@@ -1498,6 +1504,19 @@ namespace Psycho.TradeLanes
                 {
                     Block.CubeGrid.CustomName = "TL " + id + " " + from + " > " + to;
                 }
+
+                // The documented Speed setting, SetupSystems used to read it but returns early
+                float superluminalSpeed;
+                var speed = ReadCustomData(CustomData, TradeLaneSpeedKeyword, TradeLaneSeparator);
+                SuperluminalSpeed = float.TryParse(speed, out superluminalSpeed)
+                    ? MathHelper.Clamp(superluminalSpeed, 500f, 500000f)
+                    : DefaultSuperluminalSpeed;
+
+                float ringInterval;
+                var interval = ReadCustomData(CustomData, TradeLaneRingIntervalKeyword, TradeLaneSeparator);
+                RingInterval = float.TryParse(interval, out ringInterval)
+                    ? MathHelper.Clamp(ringInterval, 1000f, 1000000f)
+                    : DefaultRingInterval;
 
                 if (SafeZoneEnabled)
                     UpdateSafeZone();
@@ -2175,7 +2194,7 @@ namespace Psycho.TradeLanes
 
                         //var speed = kilometers > 10 ? SuperluminalSpeed : MathHelper.Clamp(SuperluminalSpeed * MathHelper.Clamp((kilometers / 10), 0f, 1f), 50f, SuperluminalSpeed);
                         var speed = kilometers > 10 ? SuperluminalSpeed : MathHelper.Clamp(SuperluminalSpeed * MathHelper.Clamp((kilometers / 5), 0f, 1f), 50f, SuperluminalSpeed);
-                        var finalSpeed = MathHelper.Lerp(grid.Speed, speed, 0.5);
+                        var finalSpeed = speed;
                         var ramp = kilometers > 10 ? 0.003 : 0.5;
                         //SetGridVelocity(grid, (travelDirection * 200), true, true);
 
