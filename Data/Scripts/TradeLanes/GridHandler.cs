@@ -779,33 +779,47 @@ namespace Psycho.TradeLanes
             MySimpleObjectDraw.DrawTransparentBox(ref wm, ref box, ref color, raster, 1, thickness, material, material);
         }
 
+        // Runs on the server and, for the sounds and particles, on every client
         public void ExecShipSystems(ShipSystem state)
         {
             var grid = Grid as IMyCubeGrid;
+            if (grid == null)
+                return;
+
+            bool server = MyAPIGateway.Session.IsServer;
+            bool effects = !MyAPIGateway.Utilities.IsDedicated;
 
             switch (state)
             {
                 case ShipSystem.Docking:
-                    GetPlayers();
-                    PlaySound(ShipSoundEmitter, TradeLaneDockingSound, ref ActiveSound);
+                    if (server)
+                        GetPlayers();
+                    if (effects)
+                        PlaySound(ShipSoundEmitter, TradeLaneDockingSound, ref ActiveSound);
                     break;
                 case ShipSystem.CancelDocking:
                     Players.Clear();
                     PlayerPos.Clear();
                     PlayerSeat.Clear();
-                    StopSoundEmitter(ShipSoundEmitter, true);
-                    PlaySound(ShipSoundEmitter, TradeLaneDisengageSound, ref ActiveSound, 2f);
+                    if (effects)
+                    {
+                        StopSoundEmitter(ShipSoundEmitter, true);
+                        PlaySound(ShipSoundEmitter, TradeLaneDisengageSound, ref ActiveSound, 2f);
+                    }
                     break;
                 case ShipSystem.Jump:
-                    InTransit = true;
+                    InTransit = server;
                     //GetPlayers();
-                    PlaySound(ShipSoundEmitter, TradeLaneJumpSound, ref ActiveSound);
+                    if (effects)
+                        PlaySound(ShipSoundEmitter, TradeLaneJumpSound, ref ActiveSound);
                     break;
                 case ShipSystem.TradeLaneDisengage:
                     InTransit = false;
                     Players.Clear();
                     PlayerPos.Clear();
                     PlayerSeat.Clear();
+                    if (!effects)
+                        break;
                     PlaySound(ShipSoundEmitter, TradeLaneDisengageSound, ref ActiveSound, 2f);
                     RemoveParticleEffects(ref ShipParticles);
                     RemoveParticleEffects(ref PathPartciles);
@@ -813,14 +827,8 @@ namespace Psycho.TradeLanes
                     if (Grid?.Physics != null && grid.ControlSystem != null)
                     {
                         var controller = grid.ControlSystem.CurrentShipController as IMyShipController;
-                        var con = grid.ControlSystem.CurrentShipController as MyShipController;
                         if (controller != null && controller.IsUnderControl)
                         {
-                            MatrixD flippedMatrix = controller.LocalMatrix;
-                            flippedMatrix.Forward = -flippedMatrix.Forward; // Flip the forward direction
-                            flippedMatrix.Up = flippedMatrix.Up;           // Keep the up direction unchanged
-                            flippedMatrix.Right = flippedMatrix.Right;
-
                             var pointOffset = WarpPoint(Grid, controller.WorldMatrix.Backward, false, 0f);
                             ShipParticles = SpawnParticleEffects(Grid as MyEntity, "RingsDisengage", MatrixD.Identity, pointOffset);
                         }
@@ -831,6 +839,8 @@ namespace Psycho.TradeLanes
                     Players.Clear();
                     PlayerPos.Clear();
                     PlayerSeat.Clear();
+                    if (!effects)
+                        break;
                     StopSoundEmitter(ShipSoundEmitter, true);
                     PlaySound(ShipSoundEmitter, TradeLaneBreakOffSound, ref ActiveSound, 2f);
                     RemoveParticleEffects(ref ShipParticles);
@@ -839,33 +849,27 @@ namespace Psycho.TradeLanes
                     if (Grid?.Physics != null && grid.ControlSystem != null)
                     {
                         var controller = grid.ControlSystem.CurrentShipController as IMyShipController;
-                        var con = grid.ControlSystem.CurrentShipController as MyShipController;
                         if (controller != null && controller.IsUnderControl)
                         {
                             MatrixD flippedMatrix = controller.LocalMatrix;
-                            flippedMatrix.Forward = flippedMatrix.Forward; // Flip the forward direction
-                            flippedMatrix.Up = flippedMatrix.Up;           // Keep the up direction unchanged
-                            flippedMatrix.Right = flippedMatrix.Right;
-
                             var pointOffset = WarpPoint(Grid, controller.WorldMatrix.Backward, false, 0f);
                             ShipParticles = SpawnParticleEffects(Grid as MyEntity, "RingsDisengage", flippedMatrix, pointOffset);
                         }
                     }
                     break;
                 case ShipSystem.TradeLaneFlight:
-                    InTransit = true;
+                    InTransit = server;
+                    if (!effects)
+                        break;
                     PlaySound(ShipSoundEmitter, TradeLaneFlightSound, ref ActiveSound, 4f);
 
                     if (Grid?.Physics != null && grid.ControlSystem != null)
                     {
                         var controller = grid.ControlSystem.CurrentShipController as IMyShipController;
-                        var con = grid.ControlSystem.CurrentShipController as MyShipController;
                         if (controller != null && controller.IsUnderControl)
                         {
                             MatrixD flippedMatrix = controller.LocalMatrix;
                             flippedMatrix.Forward = -flippedMatrix.Forward; // Flip the forward direction
-                            flippedMatrix.Up = flippedMatrix.Up;           // Keep the up direction unchanged
-                            flippedMatrix.Right = flippedMatrix.Right;
 
                             var pointOffset = WarpPoint(Grid, controller.WorldMatrix.Forward, true, 0f);
                             ShipParticles = SpawnParticleEffects(Grid as MyEntity, ShipParticlesName, flippedMatrix, pointOffset);

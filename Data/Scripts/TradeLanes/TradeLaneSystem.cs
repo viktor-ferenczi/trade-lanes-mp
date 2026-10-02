@@ -123,6 +123,8 @@ namespace Psycho.TradeLanes
 
             SetUpdateOrder(MyUpdateOrder.AfterSimulation);
 
+            TradeLaneNetwork.Load();
+
             // crahses!!
             /*
             var existingGps = MyAPIGateway.Session.GPS.GetGpsList(MyAPIGateway.Session.Player.IdentityId);
@@ -143,6 +145,7 @@ namespace Psycho.TradeLanes
         protected override void UnloadData()
         {
             //base.UnloadData();
+            TradeLaneNetwork.Unload();
             Instance = null;
         }
 
@@ -150,6 +153,8 @@ namespace Psycho.TradeLanes
 
         public override void UpdateAfterSimulation()
         {
+            TradeLaneNetwork.Update();
+
             if (!DoOnce)
             {
                 

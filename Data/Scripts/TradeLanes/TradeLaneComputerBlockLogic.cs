@@ -159,6 +159,14 @@ namespace Psycho.TradeLanes
         IMyTerminalBlock SourceBlock;
         bool InhertiRotation = false;
 
+        // Where the lane leads. The server takes it from TargetBlock, a client
+        // from the server, since the far computer is rarely streamed in.
+        bool HasTarget = false;
+        Vector3D TargetPosition;
+        Vector3D TargetGridPosition;
+        Vector3D TargetUp;
+        int LaneInfoRequestCountdown = 0;
+
         public string Location = "Uncharted";
 
         string TradeLane_DummyName =        "lane_1";
@@ -400,7 +408,7 @@ namespace Psycho.TradeLanes
                 //Block.PropertiesChanged -= Block_CustomDataChanged;
                 Block.CubeGridChanged -= Block_CubeGridChanged;
 
-                if (Block.CubeGrid != null)
+                if (Block.CubeGrid != null && MyAPIGateway.Session.Player != null)
                 {
                     var globalLaneIdent = $"Trade Lane Network\nID:{Block.CubeGrid.EntityId}";
                     // Check if a GPS marker with the same name already exists
@@ -408,7 +416,7 @@ namespace Psycho.TradeLanes
                     if (existingGps != null)
                         MyAPIGateway.Session.GPS.RemoveLocalGps(existingGps);
                 }
-                if (Block.CubeGrid != null)
+                if (Block.CubeGrid != null && MyAPIGateway.Session.Player != null)
                 {
                     var localLaneIdent = $"Trade Lane Information\nID:{Block.CubeGrid.EntityId}";
                     // Check if a GPS marker with the same name already exists
@@ -802,8 +810,11 @@ namespace Psycho.TradeLanes
                 {
                     Battery.CurrentStoredPower = Battery.MaxStoredPower;
                     var battery = Battery as IMyBatteryBlock;
-                    battery.Enabled = true;
-                    battery.ChargeMode = Sandbox.ModAPI.Ingame.ChargeMode.Discharge;
+                    if (TradeLaneNetwork.IsServer)
+                    {
+                        battery.Enabled = true;
+                        battery.ChargeMode = Sandbox.ModAPI.Ingame.ChargeMode.Discharge;
+                    }
                 }
 
                 //MyAPIGateway.Utilities.ShowNotification("Check100");
@@ -867,7 +878,16 @@ namespace Psycho.TradeLanes
                 if (!Block.CustomName.ToLower().Contains("tradelanecomputer:") && !int.TryParse(Block.CustomName.Substring(Block.CustomName.LastIndexOf(':') + 1), out laneId) && string.IsNullOrEmpty(tlid))
                     return;
 
-                if (TradeLanes.Count > 0 && TargetBlock == null)
+                if (!TradeLaneNetwork.IsServer)
+                {
+                    // Ask until the server answers, it also sends updates on its own
+                    if (!HasTarget && --LaneInfoRequestCountdown <= 0)
+                    {
+                        TradeLaneNetwork.RequestLaneInfo(Block.EntityId);
+                        LaneInfoRequestCountdown = 3;
+                    }
+                }
+                else if (TradeLanes.Count > 0 && TargetBlock == null)
                 {
                     tlid = "TLID:" + tlid;
                     //MyAPIGateway.Utilities.ShowMessage("tlid data", tlid);
@@ -902,13 +922,16 @@ namespace Psycho.TradeLanes
                     return;
                 }
 
-                if (TargetBlock != null)
+                if (TradeLaneNetwork.IsServer)
+                    UpdateTarget();
+
+                if (HasTarget)
                 {
                     //if (TargetBlock.CustomName != Block.CustomName)
                     //    return;
                     //RotateGridTowardsTarget(Block, TargetBlock, InhertiRotation);
                     //RotateGridTowardsTargetByBlockOrientationRefence(Block, TargetBlock, InhertiRotation);
-                    RotateGridTowardsTargetByBlockOrientationRefence(Block, TargetBlock, InhertiRotation);
+                    RotateGridTowardsTargetByBlockOrientationRefence(Block, TargetPosition, TargetGridPosition, TargetUp, InhertiRotation);
                 }
 
                 /*
@@ -936,7 +959,7 @@ namespace Psycho.TradeLanes
                 //Block.CustomData = Block.CustomData = InhertiRotation.ToString();
 
                 // Handles the return and entity cleanup.
-                if (TargetBlock == null || TargetBlock.MarkedForClose)
+                if (!HasTarget)
                 {
                     TargetBlock = null;
                     /*
@@ -1011,7 +1034,7 @@ namespace Psycho.TradeLanes
                 }
                 
                 // Get distance between first and last trade lane computers in meters.
-                var distnace = Vector3D.Distance(Block.WorldMatrix.Translation, TargetBlock.WorldMatrix.Translation);
+                var distnace = Vector3D.Distance(Block.WorldMatrix.Translation, TargetPosition);
 
                 var kilometers = distnace / 1000f;
                 int ringEveryKm = 7; // Roughly set a TL ring every X kilometers.
@@ -1025,10 +1048,10 @@ namespace Psycho.TradeLanes
                     //var middleGateCount = MathHelper.RoundToInt(distnace / ringEveryKilometer);
 
                     var ringCount = MathHelper.Clamp(MathHelper.RoundToInt(kilometers / ringEveryKm), 1, int.MaxValue);
-                    AddPointsBetweenGates(Block.WorldMatrix.Translation, TargetBlock.WorldMatrix.Translation, ref LaneGatePoints, ringCount);
+                    AddPointsBetweenGates(Block.WorldMatrix.Translation, TargetPosition, ref LaneGatePoints, ringCount);
                 }
                 else
-                    AddPointsBetweenGates(Block.WorldMatrix.Translation, TargetBlock.WorldMatrix.Translation, ref LaneGatePoints, 1);
+                    AddPointsBetweenGates(Block.WorldMatrix.Translation, TargetPosition, ref LaneGatePoints, 1);
 
                 GateCountHandler(ref LaneGates, ref LaneGatePoints);
                 GateCountHandler(ref LaneGatesParts1, ref LaneGatePoints, 1);
@@ -1393,11 +1416,12 @@ namespace Psycho.TradeLanes
                         RotateRing2(ring, Vector3D.Forward, MathHelper.ToRadians(RingRotationSpeed));
                 }
 
-                if (TargetBlock == null)
+                if (!HasTarget)
                     return;
 
                 // HANDLE GRIDS IN TRANSIT
-                TransitHandler();
+                if (TradeLaneNetwork.IsServer)
+                    TransitHandler();
                 TriggerActivators();
 
                 if (LaneGates.Count > 0)
@@ -2048,7 +2072,6 @@ namespace Psycho.TradeLanes
                     {
                         GridsInTransit.RemoveAt(i);
                         ControllersInTransit.Remove(grid);
-                        PlayersInTransit.Remove(MyAPIGateway.Session.Player.IdentityId);
                         continue;
                     }
 
@@ -2125,7 +2148,6 @@ namespace Psycho.TradeLanes
 
                         GridsInTransit.RemoveAt(i);
                         ControllersInTransit.Remove(grid);
-                        PlayersInTransit.Remove(MyAPIGateway.Session.Player.IdentityId);
                         GridIgnore.Remove(grid);
 
                         InstructShipSystems(grid, CustomGridLogic.ShipSystem.TradeLaneDisengage);
@@ -2143,7 +2165,7 @@ namespace Psycho.TradeLanes
                         */
                         OverrideThrusters(grid, Vector3D.Zero, true);
 
-                        MyAPIGateway.Utilities.ShowNotification($"Arrived.");
+                        TradeLaneNetwork.Notify(grid, "Arrived.");
                     }
                     else if (kilometers > DisengageDistance && grid.DampenersEnabled == false)
                     {
@@ -2198,7 +2220,6 @@ namespace Psycho.TradeLanes
                     {
                         GridsInTransit.RemoveAt(i);
                         ControllersInTransit.Remove(grid);
-                        PlayersInTransit.Remove(MyAPIGateway.Session.Player.IdentityId);
                         GridIgnore.Remove(grid);
                         //grid.Physics.LinearVelocity = (travelDirection * SuperluminalSpeed);
                         grid.Physics.LinearVelocity = Vector3D.Normalize(grid.Physics.LinearVelocity) * 50;
@@ -2228,7 +2249,6 @@ namespace Psycho.TradeLanes
 
                         GridsInTransit.RemoveAt(i);
                         ControllersInTransit.Remove(grid);
-                        PlayersInTransit.Remove(MyAPIGateway.Session.Player.IdentityId);
                         GridIgnore.Remove(grid);
 
                         InstructShipSystems(grid, CustomGridLogic.ShipSystem.TradeLaneBreakOff);
@@ -2247,7 +2267,7 @@ namespace Psycho.TradeLanes
 
                     var displaySpeed = GetSpeed(grid);
 
-                    MyAPIGateway.Utilities.ShowNotification($"Distance: {MathHelper.RoundOn2((float)distance/1000):F0}Km | Speed: {displaySpeed:F0}", 16);
+                    TradeLaneNetwork.Notify(grid, $"Distance: {MathHelper.RoundOn2((float)distance/1000):F0}Km | Speed: {displaySpeed:F0}", 16);
                 }
 
                 /*
@@ -2366,7 +2386,8 @@ namespace Psycho.TradeLanes
                         var laneMatrix = gate.WorldMatrix;
                         Quaternion.CreateFromRotationMatrix(ref laneMatrix, out DetectBoundingBox.Orientation);
                         //DrawOBB(DetectBoundingBox, color);
-                        DockingHandler(gate);
+                        if (TradeLaneNetwork.IsServer)
+                            DockingHandler(gate);
                     }
                 }
 
@@ -2691,16 +2712,8 @@ namespace Psycho.TradeLanes
                     /*
                     */
                     //StopSoundEmitter(TradeLaneSoundEmitter);
-                    StopSoundEmitter(ShipSoundEmitter, true);
-                    
                     //SpawnSoundEmitter(gate, "ShipJumpDriveJumpOut", ref ShipSoundEmitter, 4f);
-                    RemoveParticleEffects(ref EnterRingPartciles);
-                    if (MyAPIGateway.Utilities.IsDedicated == false)
-                    {
-                        SpawnParticleEffectsOnto(gate as MyEntity, CancelRingMergeParticleName, MatrixD.Identity);
-
-                        SpawnParticleEffects(gate as MyEntity, RingMergeParticleName, MatrixD.Identity, grid.PositionComp.WorldAABB.Center);
-                    }
+                    PlayGateEffect(gate, grid, GateEffectKind.CancelDocking);
                     //LaneDataDict[gate] = gateData;
                     InstructShipSystems(grid, CustomGridLogic.ShipSystem.CancelDocking);
                 }
@@ -2749,16 +2762,15 @@ namespace Psycho.TradeLanes
                             {
                                 if (LaneDataDict[gate].GridDockFrame > 0 && --LaneDataDict[gate].GridDockFrame <= 0)
                                 {
-                                    MyAPIGateway.Utilities.ShowMessage("Trade Lane", $"{grid.DisplayName} | Request Granted");
+                                    TradeLaneNetwork.Notify(grid, $"{grid.DisplayName} | Request Granted", sender: "Trade Lane");
                                     LaneDataDict[gate].GridMergeStage = 2;
                                     LaneDataDict[gate].GridPrepFrame = 300;
                                     //LaneDataDict[gate] = gateData;
                                     //TradeLaneSoundEmitter = SpawnSoundEffects(MyAPIGateway.Session.Player.Character as IMyEntity, "ShipJumpDriveCharging", 5f);
                                     //TradeLaneSoundEmitter = SpawnSoundEffects(MyAPIGateway.Session.Player.Character as IMyEntity, "ShipPrototechJumpDriveJumpIn", 1f);
                                     //TradeLaneSoundEmitter = SpawnSoundEmitter(MyAPIGateway.Session.Player.Character as IMyEntity, "ShipJumpDriveCharging", 1f);
-                                    StopSoundEmitter(ShipSoundEmitter);
                                     //SpawnSoundEmitter(gate, "ShipJumpDriveCharging", ref ShipSoundEmitter, 1f);
-                                    ResetParticleEffects(GateParticles[gate]);
+                                    PlayGateEffect(gate, grid, GateEffectKind.StageChange);
                                     InstructShipSystems(grid, CustomGridLogic.ShipSystem.Docking);
                                 }
                             }
@@ -2781,9 +2793,8 @@ namespace Psycho.TradeLanes
                                     LaneDataDict[gate].GridPrepFrame = 300;
                                     //LaneDataDict[gate] = gateData;
                                     //TradeLaneSoundEmitter = SpawnSoundEmitter(MyAPIGateway.Session.Player.Character as IMyEntity, "ShipPrototechJumpDriveJumpIn", 1f);
-                                    StopSoundEmitter(ShipSoundEmitter);
                                     //SpawnSoundEmitter(gate, "ShipPrototechJumpDriveJumpIn", ref ShipSoundEmitter, 0.02f);
-                                    ResetParticleEffects(GateParticles[gate]);
+                                    PlayGateEffect(gate, grid, GateEffectKind.StageChange);
                                     OverrideThrusters(grid, Vector3D.Zero, true);
                                     InstructShipSystems(grid, CustomGridLogic.ShipSystem.TradeLaneMergeOnto);
                                     //TradeLaneSoundEmitter = SpawnSoundEffects(MyAPIGateway.Session.Player.Character as IMyEntity, "ShipJumpDriveCharging", 1f);
@@ -2799,7 +2810,6 @@ namespace Psycho.TradeLanes
                             var controller = GetController(grid);
                             if (controller != null)
                                 ControllersInTransit[grid] = controller;
-                            PlayersInTransit.Add(MyAPIGateway.Session.Player.IdentityId);
                             GridIgnore.Add(grid);
 
                             MatrixD flippedMatrix = MatrixD.Identity;
@@ -2866,7 +2876,7 @@ namespace Psycho.TradeLanes
                             DistanceUpdateFrame = DistanceUpdateInterval;
                         }
 
-                        MyAPIGateway.Utilities.ShowNotification($"Docking Stage: {LaneDataDict[gate].GridMergeStage} ({DockStageDistanceDisplay}) | Distance: {TargetDistanceDisplay}", 16);
+                        TradeLaneNetwork.Notify(grid, $"Docking Stage: {LaneDataDict[gate].GridMergeStage} ({DockStageDistanceDisplay}) | Distance: {TargetDistanceDisplay}", 16);
                     }
                 }
             }
@@ -2928,7 +2938,7 @@ namespace Psycho.TradeLanes
                     if (GridsInTransit.Contains(grid))
                         return;
 
-                    MyAPIGateway.Utilities.ShowMessage($"{grid.DisplayName}", $"Trade Lane | Request Docking");
+                    TradeLaneNetwork.Notify(grid, "Trade Lane | Request Docking", sender: grid.DisplayName);
                     TargetDistanceDisplay = 0;
                     DockStageDistanceDisplay = 0;
                     DistanceUpdateFrame = DistanceUpdateInterval;
@@ -2940,9 +2950,7 @@ namespace Psycho.TradeLanes
                     //TradeLaneSoundEmitter = SpawnSoundEmitter(MyAPIGateway.Session.Player.Character as IMyEntity, "ShipJumpDriveCharging", 1f);
                     //SpawnSoundEmitter(MyAPIGateway.Session.Player.Character as IMyEntity, "BlockGravityGen", ref TradeLaneSoundEmitter, 5f);
                     //SpawnSoundEmitter(gate, "BlockSafeZone", ref ShipSoundEmitter, 1f);
-                    RemoveParticleEffects(ref EnterRingPartciles);
-                    if (MyAPIGateway.Utilities.IsDedicated == false)
-                        EnterRingPartciles = SpawnParticleEffects(gate as MyEntity, RingMergeParticleName, MatrixD.Identity, grid.PositionComp.WorldAABB.Center);
+                    PlayGateEffect(gate, grid, GateEffectKind.RequestDocking);
                     InstructShipSystems(LaneDataDict[gate].GridInWaitingLine, CustomGridLogic.ShipSystem.RequestDocking);
                     //ResetParticleEffects(GateParticles[gate]);
                     //StopSoundEmitter(TradeLaneSoundEmitter);
@@ -4518,20 +4526,19 @@ namespace Psycho.TradeLanes
             grid.WorldMatrix = rotationMatrix;
         }
 
-        private void RotateGridTowardsTargetByBlockOrientationRefence(IMyTerminalBlock block, IMyTerminalBlock targetBlock, bool inheritOrientation = false)
+        private void RotateGridTowardsTargetByBlockOrientationRefence(IMyTerminalBlock block, Vector3D targetBlockPosition, Vector3D targetGridPosition, Vector3D targetGridUp, bool inheritOrientation = false)
         {
-            if (block == null || targetBlock == null)
+            if (block == null)
             {
-                MyAPIGateway.Utilities.ShowNotification("Block or TargetBlock is null", 16);
+                MyAPIGateway.Utilities.ShowNotification("Block is null", 16);
                 return;
             }
 
             MyCubeGrid blockGrid = block.CubeGrid as MyCubeGrid;
-            MyCubeGrid targetGrid = targetBlock.CubeGrid as MyCubeGrid;
 
-            if (blockGrid == null || targetGrid == null)
+            if (blockGrid == null)
             {
-                MyAPIGateway.Utilities.ShowNotification("BlockGrid or TargetGrid is null", 16);
+                MyAPIGateway.Utilities.ShowNotification("BlockGrid is null", 16);
                 return;
             }
 
@@ -4578,20 +4585,18 @@ namespace Psycho.TradeLanes
                 blockGrid.WorldMatrix = blockGridWorldMatrix;
                 */
 
-                // Get the targetBlock's grid world orientation
-                MatrixD targetGridWorldMatrix = targetGrid.WorldMatrix;
 
                 // Get the block's grid current world matrix
                 MatrixD blockGridWorldMatrix = blockGrid.WorldMatrix;
 
                 // Calculate the direction vector from the block's grid to the targetBlock
-                Vector3D directionToTarget = Vector3D.Normalize(targetGridWorldMatrix.Translation - blockGridWorldMatrix.Translation);
+                Vector3D directionToTarget = Vector3D.Normalize(targetGridPosition - blockGridWorldMatrix.Translation);
 
                 // Set the Forward direction of the block's grid to face the targetBlock
                 blockGridWorldMatrix.Forward = directionToTarget;
 
                 // Align the Up direction of the block's grid with the targetBlock's Up direction
-                blockGridWorldMatrix.Up = targetGridWorldMatrix.Up;
+                blockGridWorldMatrix.Up = targetGridUp;
 
                 // Recalculate the Right direction to ensure orthogonality
                 blockGridWorldMatrix.Right = Vector3D.Cross(blockGridWorldMatrix.Forward, blockGridWorldMatrix.Up);
@@ -4609,7 +4614,7 @@ namespace Psycho.TradeLanes
             else
             {
                 MyCubeGrid grid = block.CubeGrid as MyCubeGrid;
-                var targetPosition = targetBlock.WorldMatrix.Translation;
+                var targetPosition = targetBlockPosition;
 
                 // Get the grid's current position
                 Vector3D gridPosition = grid.WorldMatrix.Translation;
@@ -4618,7 +4623,7 @@ namespace Psycho.TradeLanes
                 Vector3D targetToGridDirection = Vector3D.Normalize(gridPosition - targetPosition);
 
                 // Get the target's up direction (assume the target is another block or entity)
-                Vector3D targetUpDirection = TargetBlock?.WorldMatrix.Up ?? Vector3D.Up; // Default to world up if no target block
+                Vector3D targetUpDirection = targetGridUp;
 
                 // If inheritOrientation is true, align the back and up directions
                 Vector3D forwardDirection = inheritOrientation ? targetToGridDirection : -targetToGridDirection;
@@ -5603,6 +5608,77 @@ namespace Psycho.TradeLanes
             if (logic == null)
                 return;
             logic.ExecShipSystems(state);
+            TradeLaneNetwork.SendShipSystem(grid, state);
+        }
+
+        // Server side: where the lane leads, from the paired computer
+        private void UpdateTarget()
+        {
+            bool hasTarget = TargetBlock != null && !TargetBlock.MarkedForClose && TargetBlock.CubeGrid != null;
+            var target = hasTarget ? TargetBlock.WorldMatrix.Translation : Vector3D.Zero;
+            var targetGrid = hasTarget ? TargetBlock.CubeGrid.WorldMatrix.Translation : Vector3D.Zero;
+            var targetUp = hasTarget ? TargetBlock.CubeGrid.WorldMatrix.Up : Vector3D.Up;
+            bool changed = hasTarget != HasTarget || target != TargetPosition || targetGrid != TargetGridPosition || targetUp != TargetUp;
+            HasTarget = hasTarget;
+            TargetPosition = target;
+            TargetGridPosition = targetGrid;
+            TargetUp = targetUp;
+            if (changed)
+                SendLaneInfo();
+        }
+
+        public void SendLaneInfo(ulong to = 0)
+        {
+            if (Block != null)
+                TradeLaneNetwork.SendLaneInfo(Block.EntityId, HasTarget, InhertiRotation, TargetPosition, TargetGridPosition, TargetUp, to);
+        }
+
+        // Client side: the server told where the lane leads
+        public void SetLaneInfo(bool hasTarget, bool inherit, Vector3D target, Vector3D targetGrid, Vector3D targetUp)
+        {
+            HasTarget = hasTarget;
+            InhertiRotation = inherit;
+            TargetPosition = target;
+            TargetGridPosition = targetGrid;
+            TargetUp = targetUp;
+        }
+
+        // Plays a ring effect here, unless this is a dedicated server, and on every client
+        private void PlayGateEffect(MyEntity gate, MyCubeGrid grid, GateEffectKind kind)
+        {
+            int index = LaneGates.IndexOf(gate);
+            GateEffect(index, grid, kind);
+            if (Block != null)
+                TradeLaneNetwork.SendGateEffect(Block.EntityId, index, grid, kind);
+        }
+
+        public void GateEffect(int gateIndex, MyCubeGrid grid, GateEffectKind kind)
+        {
+            if (MyAPIGateway.Utilities.IsDedicated || gateIndex < 0 || gateIndex >= LaneGates.Count)
+                return;
+
+            var gate = LaneGates[gateIndex];
+            MyParticleEffect particles;
+            switch (kind)
+            {
+                case GateEffectKind.RequestDocking:
+                    RemoveParticleEffects(ref EnterRingPartciles);
+                    if (grid != null)
+                        EnterRingPartciles = SpawnParticleEffects(gate, RingMergeParticleName, MatrixD.Identity, grid.PositionComp.WorldAABB.Center);
+                    break;
+                case GateEffectKind.CancelDocking:
+                    StopSoundEmitter(ShipSoundEmitter, true);
+                    RemoveParticleEffects(ref EnterRingPartciles);
+                    SpawnParticleEffectsOnto(gate, CancelRingMergeParticleName, MatrixD.Identity);
+                    if (grid != null)
+                        SpawnParticleEffects(gate, RingMergeParticleName, MatrixD.Identity, grid.PositionComp.WorldAABB.Center);
+                    break;
+                case GateEffectKind.StageChange:
+                    StopSoundEmitter(ShipSoundEmitter);
+                    if (GateParticles.TryGetValue(gate, out particles))
+                        ResetParticleEffects(particles);
+                    break;
+            }
         }
 
         #endregion
