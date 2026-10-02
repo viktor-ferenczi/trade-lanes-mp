@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Definitions xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <CubeBlocks>
+<Definition xsi:type="MyObjectBuilder_BatteryBlockDefinition">
+			<Id>
+				<TypeId>BatteryBlock</TypeId>
+				<SubtypeId>TradeLaneComputer</SubtypeId>
+			</Id>
+			<DisplayName>Trade Lane Computer</DisplayName>
+			<Description>EXPERIMENTAL</Description>
+			<Icon>Textures\GUI\Icons\Cubes\SafeZoneBlock.dds</Icon>
+			<CubeSize>Large</CubeSize>
+			<BlockTopology>TriangleMesh</BlockTopology>
+			<Size x="1" y="1" z="1"/>
+			<ModelOffset x="0" y="0" z="0"/>
+			<Model>Models\Psycho\Large\Trade_Lane_Computer.mwm</Model>
+            <Components>
+                <Component Subtype="Unknown" Count="1">
+                    <DeconstructId>
+                        <TypeId>Ore</TypeId>
+                        <SubtypeId>Scrap</SubtypeId>
+                    </DeconstructId>
+                </Component>
+            </Components>
+            <CriticalComponent Subtype="Unknown" Index="0" />
+            <MountPoints>
+                <!--MountPoint Side="Bottom" StartX="0" StartY="0" EndX="1" EndY="1" Default="true" />
+                <MountPoint Side="Top" StartX="0" StartY="0" EndX="1" EndY="1" />
+                <MountPoint Side="Front" StartX="0" StartY="0" EndX="1" EndY="1" />
+                <MountPoint Side="Back" StartX="0" StartY="0" EndX="1" EndY="1" />
+                <MountPoint Side="Left" StartX="0" StartY="0" EndX="1" EndY="1" />
+                <MountPoint Side="Right" StartX="0" StartY="0" EndX="1" EndY="1" /-->
+                <MountPoint Side="Back" StartX="0" StartY="0" EndX="0" EndY="0" Enabled="false" />
+            </MountPoints>
+			<BlockPairName>TradeLaneComputer</BlockPairName>
+			<MirroringY>Z</MirroringY>
+
+            <ResourceSourceGroup>Battery</ResourceSourceGroup>
+            <MaxPowerOutput>12</MaxPowerOutput>
+
+            <ResourceSinkGroup>BatteryBlock</ResourceSinkGroup>
+            <RequiredPowerInput>12</RequiredPowerInput>
+            <AdaptibleInput>false</AdaptibleInput>
+            <InitialStoredPowerRatio>12</InitialStoredPowerRatio>
+            <MaxStoredPower>12</MaxStoredPower>
+            <RechargeMultiplier>12</RechargeMultiplier>
+            <TargetingGroups>
+                <string>PowerSystems</string>
+            </TargetingGroups>
+            <IsAirTight>false</IsAirTight>
+		</Definition>
+  </CubeBlocks>
+</Definitions>

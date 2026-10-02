@@ -1,0 +1,80 @@
+<?xml version="1.0"?>
+<Definitions xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <Sounds>
+        <Sound>
+            <Id>
+                <TypeId>MyObjectBuilder_AudioDefinition</TypeId>
+                <SubtypeId>TradeLane_Flight</SubtypeId>
+            </Id>
+            <Category>BLOCK</Category>
+            <MaxDistance>25</MaxDistance>
+            <UpdateDistance>30</UpdateDistance>
+            <Volume>2</Volume>
+            <Loopable>true</Loopable>
+            <Waves>
+                <Wave Type="D3">
+                    <Start>Audio\jump_in.wav</Start>
+                    <Loop>Audio\jump_flight.wav</Loop>
+                    <End>Audio\jump_out.wav</End>
+                </Wave>
+            </Waves>
+        </Sound>
+
+
+
+
+
+        <Sound>
+            <Id>
+                <TypeId>MyObjectBuilder_AudioDefinition</TypeId>
+                <SubtypeId>_atc_leg_f01a_YourRequest</SubtypeId>
+            </Id>
+            <Category>WEP_EXPL</Category>
+            <MaxDistance>150</MaxDistance>
+            <Volume>1</Volume>
+            <PitchVariation>100</PitchVariation>
+            <PreventSynchronization>10</PreventSynchronization>
+            <SoundLimit>1</SoundLimit>
+            <!--<DistantSounds>
+        <DistantSound distanceCrossfade="1" distance="30" sound="RealWepSmallMissileExplDistA"/>
+      </DistantSounds>-->
+            <Waves>
+                <Wave Type="D3">
+                    <Start>Audio\jump_flight.wav</Start>
+                </Wave>
+                <Wave Type="D3">
+                    <Start>Audio\jump_flight.wav</Start>
+                </Wave>
+                <Wave Type="D3">
+                    <Start>Audio\jump_flight.wav</Start>
+                </Wave>
+            </Waves>
+        </Sound>
+        <Sound>
+            <Id>
+                <TypeId>MyObjectBuilder_AudioDefinition</TypeId>
+                <SubtypeId>_atc_leg_f01a_YourRequest</SubtypeId>
+            </Id>
+            <Category>WEP_EXPL</Category>
+            <MaxDistance>150</MaxDistance>
+            <Volume>1</Volume>
+            <PitchVariation>100</PitchVariation>
+            <PreventSynchronization>10</PreventSynchronization>
+            <SoundLimit>1</SoundLimit>
+            <!--<DistantSounds>
+        <DistantSound distanceCrossfade="1" distance="30" sound="RealWepSmallMissileExplDistA"/>
+      </DistantSounds>-->
+            <Waves>
+                <Wave Type="D3">
+                    <Start>Audio\jump_flight.wav</Start>
+                </Wave>
+                <Wave Type="D3">
+                    <Start>Audio\jump_flight.wav</Start>
+                </Wave>
+                <Wave Type="D3">
+                    <Start>Audio\jump_flight.wav</Start>
+                </Wave>
+            </Waves>
+        </Sound>
+  </Sounds>
+</Definitions>

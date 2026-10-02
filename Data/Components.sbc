@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<Definitions xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+    <Components>
+        <Component>
+            <Id>
+                <TypeId>Component</TypeId>
+                <SubtypeId>Unknown</SubtypeId>
+            </Id>
+            <DisplayName>???</DisplayName>
+            <Icon>Textures\GUI\Icons\component\warning.png</Icon>
+            <Size>
+                <X>0.2</X>
+                <Y>0.1</Y>
+                <Z>0.1</Z>
+            </Size>
+            <Mass>1000</Mass>
+            <Volume>1000000</Volume>
+            <Model>Models\Components\construction_components_component.mwm</Model>
+            <PhysicalMaterial>Metal</PhysicalMaterial>
+            <MaxIntegrity>1000000</MaxIntegrity>
+            <DropProbability>0.5</DropProbability>
+            <Health>18</Health>
+            <MinimumOfferAmount>0</MinimumOfferAmount>
+            <MaximumOfferAmount>0</MaximumOfferAmount>
+            <MinimumOrderAmount>0</MinimumOrderAmount>
+            <MaximumOrderAmount>0</MaximumOrderAmount>
+            <CanPlayerOrder>false</CanPlayerOrder>
+
+            <MinimumAcquisitionAmount>0</MinimumAcquisitionAmount>
+            <MaximumAcquisitionAmount>0</MaximumAcquisitionAmount>
+
+            <MaxStackAmount>10</MaxStackAmount>
+
+            <Public>false</Public>
+        </Component>
+    </Components>
+</Definitions>
