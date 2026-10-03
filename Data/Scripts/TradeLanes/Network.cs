@@ -6,6 +6,7 @@ using Sandbox.Game.Entities;
 using Sandbox.ModAPI;
 using VRage.Game.ModAPI;
 using VRage.ModAPI;
+using VRage.Utils;
 using VRageMath;
 
 // Multiplayer support.
@@ -22,6 +23,8 @@ using VRageMath;
 // - GateEffect: particles on a ring when a ship requests docking or cancels it.
 // - Notification: HUD text and chat lines for the players aboard the ship.
 // - SeatLock: tells a client its USE control (F) is blocked while it travels.
+// - SeatUnlockRequest: a client whose pilot is out of the seat anyway asks the
+//   server to lift that block, only the server can.
 
 namespace Psycho.TradeLanes
 {
@@ -33,6 +36,7 @@ namespace Psycho.TradeLanes
         GateEffect,
         Notification,
         SeatLock,
+        SeatUnlockRequest,
     }
 
     public enum GateEffectKind
@@ -91,10 +95,6 @@ namespace Psycho.TradeLanes
         static readonly Dictionary<long, int> StatusSentAt = new Dictionary<long, int>();
         static readonly List<IMyPlayer> Players = new List<IMyPlayer>();
 
-        // Server: the players whose seat is locked, per grid
-        static readonly Dictionary<long, List<IMyPlayer>> SeatLocks =
-            new Dictionary<long, List<IMyPlayer>>();
-
         // Client: the stand-ins drawing the lanes, by computer block id
         static readonly Dictionary<long, TradeLaneComputerBlockLogic> ClientLanes =
             new Dictionary<long, TradeLaneComputerBlockLogic>();
@@ -120,7 +120,6 @@ namespace Psycho.TradeLanes
                 lane.Close();
             ClientLanes.Clear();
             StatusSentAt.Clear();
-            SeatLocks.Clear();
             StatusText = null;
 
             // The block outlives the session, a client that left mid-travel would keep it
@@ -139,6 +138,9 @@ namespace Psycho.TradeLanes
                 else
                     StatusText = null;
             }
+
+            if (SeatLocked && Frame % 60 == 0)
+                CheckSeatLock();
 
             if (IsServer)
                 return;
@@ -262,45 +264,53 @@ namespace Psycho.TradeLanes
         }
 
         // Keeps the players seated on the grid in their seats: their USE control (F)
-        // is blocked until the grid leaves the lane. The game syncs the block to the
-        // player's client. Players who come aboard later are not locked.
-        public static void LockSeats(IMyCubeGrid grid, bool locked)
+        // is blocked until the grid leaves the lane. Returns their identities, the
+        // ship keeps them with its trip. Players who come aboard later are not locked.
+        public static List<long> LockSeats(IMyCubeGrid grid)
         {
-            if (!IsServer || grid == null)
+            var identities = new List<long>();
+            Players.Clear();
+            MyAPIGateway.Players.GetPlayers(Players, player => IsSeated(player, grid));
+            foreach (var player in Players)
+                identities.Add(player.IdentityId);
+            Players.Clear();
+
+            SetSeatLock(identities, true);
+            return identities;
+        }
+
+        // Blocks or frees the USE control of these players. The game syncs the
+        // block to the player's client, if the player is online.
+        public static void SetSeatLock(List<long> identities, bool locked)
+        {
+            if (!IsServer || identities == null)
                 return;
 
-            List<IMyPlayer> players;
-            if (locked)
-            {
-                if (SeatLocks.ContainsKey(grid.EntityId))
-                    return;
-                players = new List<IMyPlayer>();
-                MyAPIGateway.Players.GetPlayers(players, player => IsSeated(player, grid));
-                SeatLocks[grid.EntityId] = players;
-            }
-            else
-            {
-                if (!SeatLocks.TryGetValue(grid.EntityId, out players))
-                    return;
-                SeatLocks.Remove(grid.EntityId);
-            }
-
-            foreach (var player in players)
+            MyLog.Default.WriteLine(
+                $"TradeLanes: seat lock {(locked ? "on" : "off")} for [{string.Join(", ", identities)}]"
+            );
+            foreach (var identity in identities)
             {
                 MyVisualScriptLogicProvider.SetPlayerInputBlacklistState(
                     UseControl,
-                    player.IdentityId,
+                    identity,
                     !locked
                 );
 
-                // So the client can lift it if the session ends mid-travel
-                if (player == MyAPIGateway.Session.Player)
-                    SeatLocked = locked;
-                else if (IsMultiplayer)
-                    Send(
-                        new TradeLaneMessage { Kind = MessageKind.SeatLock, Flag = locked },
-                        player.SteamUserId
-                    );
+                // So the client knows its F is blocked
+                Players.Clear();
+                MyAPIGateway.Players.GetPlayers(Players, player => player.IdentityId == identity);
+                foreach (var player in Players)
+                {
+                    if (player == MyAPIGateway.Session.Player)
+                        SeatLocked = locked;
+                    else if (IsMultiplayer)
+                        Send(
+                            new TradeLaneMessage { Kind = MessageKind.SeatLock, Flag = locked },
+                            player.SteamUserId
+                        );
+                }
+                Players.Clear();
             }
         }
 
@@ -371,6 +381,32 @@ namespace Psycho.TradeLanes
             lane.ApplyLaneInfo(message);
         }
 
+        // The ship lifts the block when it leaves the lane. A pilot who is out of
+        // the seat anyway, because the ship was removed or the character died,
+        // gets F back here.
+        static void CheckSeatLock()
+        {
+            var player = MyAPIGateway.Session.Player;
+            if (player == null || player.Character?.Parent is IMyCockpit)
+                return;
+
+            SeatLocked = false;
+            MyLog.Default.WriteLine("TradeLanes: out of the seat, lifting the seat lock");
+            if (IsServer)
+                MyVisualScriptLogicProvider.SetPlayerInputBlacklistState(
+                    UseControl,
+                    player.IdentityId,
+                    true
+                );
+            else
+                MyAPIGateway.Multiplayer.SendMessageToServer(
+                    Channel,
+                    MyAPIGateway.Utilities.SerializeToBinary(
+                        new TradeLaneMessage { Kind = MessageKind.SeatUnlockRequest }
+                    )
+                );
+        }
+
         static void SetLocalSeatLock(bool locked)
         {
             SeatLocked = locked;
@@ -425,6 +461,21 @@ namespace Psycho.TradeLanes
                     return;
                 }
 
+                if (message.Kind == MessageKind.SeatUnlockRequest)
+                {
+                    var identity = MyAPIGateway.Players.TryGetIdentityId(sender);
+                    MyLog.Default.WriteLine(
+                        $"TradeLanes: seat lock off for {identity}, asked by the client"
+                    );
+                    if (IsServer && identity != 0)
+                        MyVisualScriptLogicProvider.SetPlayerInputBlacklistState(
+                            UseControl,
+                            identity,
+                            true
+                        );
+                    return;
+                }
+
                 // Everything else is the server's word
                 if (!fromServer || IsServer)
                     return;
@@ -464,6 +515,9 @@ namespace Psycho.TradeLanes
                         break;
 
                     case MessageKind.SeatLock:
+                        MyLog.Default.WriteLine(
+                            $"TradeLanes: the server set the seat lock {message.Flag}"
+                        );
                         // The server already blocked the control, this only keeps track
                         SeatLocked = message.Flag;
                         break;

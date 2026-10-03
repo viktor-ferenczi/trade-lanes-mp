@@ -60,6 +60,7 @@ using System.Security.Cryptography;
 using VRage.Game.Utils;
 using System.Reflection;
 using Sandbox.Engine.Physics;
+using System.Globalization;
 //using static VRageRender.Utils.MyWingedEdgeMesh;
 //using Microsoft.Xml.Serialization.GeneratedAssembly;
 //using static System.Collections.Specialized.BitVector32;
@@ -118,6 +119,7 @@ namespace Psycho.TradeLanes
         string TradeLaneSeparator = ":";
         string TradeLaneHomeKeyword = "From";
         string TradeLaneTargetKeyword = "To";
+        string TradeLaneTargetGpsKeyword = "Target";
         string TradeLaneSpeedKeyword = "Speed";
         string TradeLaneRingScaleKeyword = "RingSize";
         string TradeLaneComputerSafeZoneRadiusKeyword = "SafeZoneRadius";
@@ -171,6 +173,22 @@ namespace Psycho.TradeLanes
         Vector3D TargetPosition;
         Vector3D TargetGridPosition;
         Vector3D TargetUp;
+
+        // The server keeps where the paired computer was last seen in this
+        // computer's ModStorage, and pairs from that while the other one is not
+        // loaded: on a cluster it is usually on another node, or offline.
+        static readonly Guid StoredTargetKey = new Guid("1e3f46c5-17fe-4f8b-89a1-4cd572165cba");
+        string StoredTargetXml;
+
+        public class StoredTarget
+        {
+            // Only valid for the lane id it was seen with
+            public string Tlid;
+            public SerializableVector3D Position;
+            public SerializableVector3D GridPosition;
+            public SerializableVector3D Up;
+            public bool InheritRotation;
+        }
         int LaneInfoRequestCountdown = 0;
         string LaneInfoSent;
 
@@ -263,13 +281,11 @@ namespace Psycho.TradeLanes
 
         IMyCubeGrid GridWaiting;
 
-        List<MyCubeGrid> GridsInTransit = new List<MyCubeGrid>();
         List<MyCubeGrid> GridsMerging = new List<MyCubeGrid>();
 
         List<long> PlayersInTransit = new List<long>();
 
-        Dictionary<MyCubeGrid, IMyShipController> ControllersInTransit = new Dictionary<MyCubeGrid, IMyShipController>();
-
+        // Ships in transit, docking ignores them. Kept by their CustomGridLogic.
         public static List<MyCubeGrid> GridIgnore = new List<MyCubeGrid>();
 
         //float DisengageDistance = 125f;     // 25
@@ -383,8 +399,6 @@ namespace Psycho.TradeLanes
 
         private int GpsRefreshInterval = 100;
         private int GpsRefreshFrame = 2;
-
-        Vector2 ShakeOffset = new Vector2(1, 1);
 
         IMyShipController ShipController = null;
 
@@ -944,8 +958,7 @@ namespace Psycho.TradeLanes
                         if (block.CustomName.ToLower().Contains("tradelanecomputer:" + laneId) || block.CustomData.ToLower().Contains(tlid.ToLower()))
                         {
                             TargetBlock = block;
-                            if (rotationSource)
-                                InhertiRotation = true;
+                            InhertiRotation = rotationSource;
 
                             break;
                         }
@@ -1477,9 +1490,7 @@ namespace Psycho.TradeLanes
                 if (!HasTarget)
                     return;
 
-                // HANDLE GRIDS IN TRANSIT
-                if (TradeLaneNetwork.IsServer)
-                    TransitHandler();
+                // A ship in transit drives itself, see Transit.cs
                 TriggerActivators();
 
                 if (LaneGates.Count > 0)
@@ -2128,256 +2139,6 @@ namespace Psycho.TradeLanes
             });
         }
 
-        private void TransitHandler()
-        {
-            if (GridsInTransit.Count > 0)
-            {
-                for (int i = GridsInTransit.Count - 1; i >= 0; i--)
-                {
-                    var grid = GridsInTransit[i];
-                    if (grid == null)
-                    {
-                        GridsInTransit.RemoveAt(i);
-                        ControllersInTransit.Remove(grid);
-                        continue;
-                    }
-
-                    var gate = LaneGates[LaneGates.Count - 1];
-
-                    /*
-                    Vector4 color = Color.Green.ToVector4() * 12;
-                    DetectBoundingBox.Center = Vector3D.Transform(DetectDummyLocalMatrix, gate.WorldMatrix);
-                    var dummyMatrix = MatrixD.CreateWorld(Vector3D.Transform(DetectDummyLocalMatrix, gate.WorldMatrix));
-                    var laneMatrix = gate.WorldMatrix;
-                    Quaternion.CreateFromRotationMatrix(ref laneMatrix, out DetectBoundingBox.Orientation);
-                    DrawOBB(DetectBoundingBox, color);
-                    */
-
-                    /*
-
-                    var currentWorldMatrix = grid.WorldMatrix;
-
-                    // Get the grid's bounding box
-                    BoundingBoxD gridBoundingBox = grid.PositionComp.WorldAABB;
-
-                    // Calculate the offset between the grid's bounding box center and its current position
-                    Vector3D boundingBoxCenter = gridBoundingBox.Center;
-                    Vector3D offset = currentWorldMatrix.Translation - boundingBoxCenter;
-
-                    // Adjust the currentWorldMatrix to account for the bounding box
-                    currentWorldMatrix.Translation += offset;
-
-                    var currentMatrix = currentWorldMatrix;
-                    */
-
-                    /*
-                    var currentMatrix = grid.WorldMatrix;
-                    //var targetMatrix = MatrixD.CreateWorld(TargetLaneDummyLocation);
-                    var targetMatrix = LaneGates[LaneGates.Count - 1].WorldMatrix;
-                    var travelDirection = Vector3D.Normalize(targetMatrix.Translation - currentMatrix.Translation);
-                    */
-
-                    var currentMatrix = grid.WorldMatrix;
-
-                    // Get the grid's bounding box
-                    BoundingBoxD gridBoundingBox = grid.PositionComp.WorldAABB;
-
-                    // Calculate the offset between the grid's bounding box center and its current position
-                    Vector3D boundingBoxCenter = gridBoundingBox.Center;
-                    Vector3D offset = currentMatrix.Translation - boundingBoxCenter;
-
-                    // Adjust the currentMatrix to account for the bounding box offset
-                    //currentMatrix.Translation += offset;
-
-                    // Adjust the targetMatrix for the bounding box offset
-                    var targetMatrix = LaneGates[LaneGates.Count - 1].WorldMatrix;
-                    targetMatrix.Translation += offset;
-
-                    // Calculate the travel direction
-                    var travelDirection = Vector3D.Normalize(targetMatrix.Translation - currentMatrix.Translation);
-
-                    // @@@
-
-
-                    var distance = Vector3D.Distance(currentMatrix.Translation, ((targetMatrix.Translation + targetMatrix.Forward) * 1));
-                    var kilometers = MathHelper.RoundOn2((float)distance / 1000f);
-                    if (CheckIfGridIsInTriggerBox(ref GateBoundingBox, grid))
-                    {
-                        var controller = GetController((IMyCubeGrid)grid) as MyShipController;
-                        if (controller != null)
-                            controller.SwitchDamping();
-                        //grid.Physics.LinearVelocity = grid.Physics.LinearVelocity * 0.2f;
-                        //grid.Physics.LinearVelocity = grid.Physics.LinearVelocity * 0.6f;
-                        //grid.Physics.LinearVelocity = (travelDirection * SuperluminalSpeed) * DisengageVelocityMult;
-                        //grid.Physics.LinearVelocity = Vector3D.Normalize(grid.Physics.LinearVelocity) * 50;
-                        grid.Physics.LinearVelocity = travelDirection * 50f;
-                        //grid = null;
-
-                        GridsInTransit.RemoveAt(i);
-                        ControllersInTransit.Remove(grid);
-                        GridIgnore.Remove(grid);
-
-                        InstructShipSystems(grid, CustomGridLogic.ShipSystem.TradeLaneDisengage);
-
-                        // MOVIGN TO NEW SYSTEM
-                        /*
-                        StopSoundEmitter(ShipSoundEmitter);
-                        //TradeLaneSoundEmitter = SpawnSoundEmitter(MyAPIGateway.Session.Player.Character as IMyEntity, "ShipJumpDriveJumpOut", 3f);
-                        SpawnSoundEmitter(MyAPIGateway.Session.Player.Character as IMyEntity, "ShipJumpDriveJumpOut", ref ShipSoundEmitter, 4f);
-                        RemoveParticleEffects(ref ShipParticles);
-                        RemoveParticleEffects(ref PathPartciles);
-                        //SpawnParticleEffectsOnto(grid as MyEntity, "RingsDisengage", MatrixD.Identity);
-                        var pointOffset = WarpPoint(grid, gate.WorldMatrix.Forward, 0f);
-                        SpawnParticleEffectsOnto(grid as MyEntity, "RingsDisengage", MatrixD.Identity, pointOffset);
-                        */
-                        OverrideThrusters(grid, Vector3D.Zero, true);
-
-                        TradeLaneNetwork.Notify(grid, "Arrived.");
-                    }
-                    else if (kilometers > DisengageDistance && grid.DampenersEnabled == false)
-                    {
-                        //SetGridDirection(grid, targetMatrix.Transla tion, 0.1);
-                        //SetGridDirection2(gate, grid, travelDirection, kilometers > 10 ? 0.1 : 1);
-                        //SetGridDirection(grid, travelDirection, kilometers > 10 ? 0.1 : 1);
-
-                        //var speed = kilometers > 10 ? SuperluminalSpeed : MathHelper.Clamp(SuperluminalSpeed * MathHelper.Clamp((kilometers / 10), 0f, 1f), 50f, SuperluminalSpeed);
-                        var speed = kilometers > 10 ? SuperluminalSpeed : MathHelper.Clamp(SuperluminalSpeed * MathHelper.Clamp((kilometers / 5), 0f, 1f), 50f, SuperluminalSpeed);
-                        var finalSpeed = speed;
-                        var ramp = kilometers > 10 ? 0.003 : 0.5;
-                        //SetGridVelocity(grid, (travelDirection * 200), true, true);
-
-                        ShakeOffset = ApplyShake(2f);
-                        //if (kilometers > 10)
-                            SetGridDirectionzzz(grid, LaneGates[LaneGates.Count - 1].WorldMatrix, 0.1f);
-                        //SetGridAngle(grid, LaneGates[LaneGates.Count - 1], travelDirection, 0.1f);
-                        SetGridVelocity2(grid, (travelDirection * finalSpeed), ShakeOffset, true, false, ramp);
-                        OverrideThrusters(grid, Vector3D.Zero);
-
-                        //ApplyShake(grid);
-                        //ApplyDrift(grid);
-                        /*
-                        if (ShipParticles == null)
-                        {
-                            //NebulaParticleTest = SpawnParticleEffects(Block as MyEntity, "TradeLaneWarp", MatrixD.Identity);
-                            //NebulaParticleTest = SpawnParticleEffects(grid as MyEntity, "TradeLaneWarp", MatrixD.Identity);
-                            ShipParticles = SpawnParticleEffects(grid as MyEntity, "WarpY", MatrixD.Identity);
-                        }
-                        if (ShipParticles != null)
-                        {
-                            //NebulaParticleTest.WorldMatrix = grid.WorldMatrix;
-                            //NebulaParticleTest.SetTranslation(GridsBoundingBoxCenterWorldPosition(grid));
-                            //var pos = GridsBoundingBoxCenterWorldPosition(grid);
-                            //var pos = WarpPoint(grid);
-                            var pos = WarpPoint(grid, Block.WorldMatrix.Backward, -25f);
-                            ShipParticles.WorldMatrix = MatrixD.CreateWorld(pos, Block.WorldMatrix.Backward, Block.WorldMatrix.Up);
-                            //NebulaParticleTest.WorldMatrix = grid.WorldMatrix;
-                        }
-
-                        if (PathPartciles == null) { }
-                            PathPartciles = SpawnParticleEffects(grid as MyEntity, "MyWarpY", MatrixD.Identity);
-                        if (PathPartciles != null)
-                        {
-                            var pos = WarpPoint(grid, Block.WorldMatrix.Backward);
-                            PathPartciles.WorldMatrix = MatrixD.CreateWorld(pos, Block.WorldMatrix.Backward, Block.WorldMatrix.Up);
-                            //NebulaParticleTest.WorldMatrix = grid.WorldMatrix;
-                        }
-                        */
-                    }
-                    else if (kilometers > DisengageDistance && grid.DampenersEnabled == true)
-                    {
-                        GridsInTransit.RemoveAt(i);
-                        ControllersInTransit.Remove(grid);
-                        GridIgnore.Remove(grid);
-                        //grid.Physics.LinearVelocity = (travelDirection * SuperluminalSpeed);
-                        grid.Physics.LinearVelocity = Vector3D.Normalize(grid.Physics.LinearVelocity) * 50;
-
-                        InstructShipSystems(grid, CustomGridLogic.ShipSystem.TradeLaneBreakOff);
-                        /*
-                        StopSoundEmitter(ShipSoundEmitter);
-                        SpawnSoundEmitter(MyAPIGateway.Session.Player.Character as IMyEntity, "ShipJumpDriveJumpOut", ref ShipSoundEmitter, 4f);
-                        RemoveParticleEffects(ref ShipParticles);
-                        RemoveParticleEffects(ref PathPartciles);
-                        //SpawnParticleEffectsOnto(grid as MyEntity, "RingsDisengage", MatrixD.Identity);
-                        var pointOffset = WarpPoint(grid, gate.WorldMatrix.Forward, 0f);
-                        SpawnParticleEffectsOnto(grid as MyEntity, "RingsDisengage", MatrixD.Identity, pointOffset);
-                        */
-                        OverrideThrusters(grid, Vector3D.Zero, true);
-                    }
-                    else
-                    {
-                        var controller = GetController((IMyCubeGrid)grid) as MyShipController;
-                        if (controller != null)
-                            controller.SwitchDamping();
-                        //grid.Physics.LinearVelocity = grid.Physics.LinearVelocity * 0.2f;
-                        //grid.Physics.LinearVelocity = grid.Physics.LinearVelocity * 0.6f;
-                        //grid.Physics.LinearVelocity = (travelDirection * SuperluminalSpeed) * DisengageVelocityMult;
-                        //grid.Physics.LinearVelocity = Vector3D.Normalize(grid.Physics.LinearVelocity) * 50;
-                        //grid = null;
-
-                        GridsInTransit.RemoveAt(i);
-                        ControllersInTransit.Remove(grid);
-                        GridIgnore.Remove(grid);
-
-                        InstructShipSystems(grid, CustomGridLogic.ShipSystem.TradeLaneBreakOff);
-                        /*
-                        StopSoundEmitter(ShipSoundEmitter);
-                        //TradeLaneSoundEmitter = SpawnSoundEmitter(MyAPIGateway.Session.Player.Character as IMyEntity, "ShipJumpDriveJumpOut", 3f);
-                        SpawnSoundEmitter(MyAPIGateway.Session.Player.Character as IMyEntity, "ShipJumpDriveJumpOut", ref ShipSoundEmitter, 4f);
-                        RemoveParticleEffects(ref ShipParticles);
-                        RemoveParticleEffects(ref PathPartciles);
-                        //SpawnParticleEffectsOnto(grid as MyEntity, "RingsDisengage", MatrixD.Identity);
-                        var pointOffset = WarpPoint(grid, gate.WorldMatrix.Forward, 0f);
-                        SpawnParticleEffectsOnto(grid as MyEntity, "RingsDisengage", MatrixD.Identity, pointOffset);
-                        */
-                        OverrideThrusters(grid, Vector3D.Zero, true);
-                    }
-
-                    var displaySpeed = GetSpeed(grid);
-
-                    TradeLaneNetwork.Notify(grid, $"Distance: {MathHelper.RoundOn2((float)distance/1000):F0}Km | Speed: {displaySpeed:F0}", 16);
-                }
-
-                /*
-                foreach (var grid in GridsInTransit)
-                {
-                    if (grid == null)
-                        continue;
-
-                    var currentMatrix = FirstGrid2.WorldMatrix;
-                    var targetMatrix = MatrixD.CreateWorld(TargetLaneDummyLocation);
-                    var travelDirection = Vector3D.Normalize(targetMatrix.Translation - currentMatrix.Translation);
-                    var distance = Vector3D.Distance(currentMatrix.Translation, targetMatrix.Translation);
-                    if (distance > 25)
-                    {
-                        SetGridDirection(grid, travelDirection, 0.1);
-                        SetGridVelocity(grid, (travelDirection * SuperluminalSpeed), true);
-                    }
-                    else
-                    {
-                        GridsInTransit.Remove(grid);
-                        //grid = null;
-                    }
-                    MyAPIGateway.Utilities.ShowNotification("dist: " + distance.ToString(), 16);
-                }
-                */
-
-                // REFERENCE
-                /*
-                var targetMatrix = MatrixD.CreateWorld(Vector3D.Transform(TargetLane1_Dummy.Matrix.Translation, TargetGate.WorldMatrix));
-                var travelDirection = Vector3D.Normalize(targetMatrix.Translation - FirstGrid1.WorldMatrix.Translation);
-                distance = Vector3D.Distance(currentWorldMatrix.Translation, Vector3D.Transform(TargetLane1_Dummy.Matrix.Translation, TargetGate.WorldMatrix));
-                if (distance > 25)
-                {
-                    SetGridDirection(FirstGrid1, travelDirection, 0.1);
-                    SetGridVelocity(FirstGrid1, (travelDirection * SuperluminalSpeed), true);
-                }
-                else
-                    FirstGrid1 = null;
-                MyAPIGateway.Utilities.ShowNotification("dist: " + distance.ToString(), 16);
-                */
-            }
-        }
-
         private void TriggerActivators()
         {
             // @@ GET GRIDS INTO TRANSIT
@@ -2871,20 +2632,15 @@ namespace Psycho.TradeLanes
                             break;
                         case 3:
                             //return;
-                            if (GridsInTransit.Contains(grid))
+                            var gridLogic = grid.GameLogic.GetAs<CustomGridLogic>();
+                            if (gridLogic == null || gridLogic.IsInTransit)
                                 break;
-                            GridsInTransit.Add(grid);
-                            var controller = GetController(grid);
-                            if (controller != null)
-                                ControllersInTransit[grid] = controller;
-                            GridIgnore.Add(grid);
 
-                            MatrixD flippedMatrix = MatrixD.Identity;
-                            flippedMatrix.Forward = -flippedMatrix.Forward; // Flip the forward direction
-                            flippedMatrix.Up = flippedMatrix.Up;           // Keep the up direction unchanged
-                            flippedMatrix.Right = flippedMatrix.Right;
-
-                            InstructShipSystems(grid, CustomGridLogic.ShipSystem.TradeLaneFlight);
+                            // The ship takes the trip from here
+                            var exitGate = LaneGates[LaneGates.Count - 1];
+                            var arrivalBox = GateBoundingBox;
+                            arrivalBox.Center = Vector3D.Transform(GateDummyLocalMatrix, exitGate.WorldMatrix);
+                            gridLogic.EnterLane(exitGate.WorldMatrix, arrivalBox, SuperluminalSpeed);
                             /*
                             var pointOffset = WarpPoint(grid, gate.WorldMatrix.Forward, 0f);
                             ShipParticles = SpawnParticleEffectsOnto(grid as MyEntity, "WarpY", flippedMatrix, pointOffset);
@@ -3002,7 +2758,7 @@ namespace Psycho.TradeLanes
                         //return;
                     }
 
-                    if (GridsInTransit.Contains(grid))
+                    if (grid.GameLogic.GetAs<CustomGridLogic>()?.IsInTransit == true)
                         return;
 
                     TradeLaneNetwork.Notify(grid, "Trade Lane | Request Docking", sender: grid.DisplayName);
@@ -3334,7 +3090,7 @@ namespace Psycho.TradeLanes
             obb.HalfExtent = dummy.Matrix.Scale / 2;
         }
 
-        private List<IMyShipController> GetShipControllersFromGrid(IMyCubeGrid grid)
+        internal static List<IMyShipController> GetShipControllersFromGrid(IMyCubeGrid grid)
         {
             var shipControllers = new List<IMyShipController>();
 
@@ -3400,7 +3156,7 @@ namespace Psycho.TradeLanes
             return null;
         }
 
-        private IMyShipController GetController(IMyCubeGrid grid)
+        internal static IMyShipController GetController(IMyCubeGrid grid)
         {
             if (grid == null)
                 return null;
@@ -4297,7 +4053,7 @@ namespace Psycho.TradeLanes
 
         #region TRIGGER BOX
 
-        private bool CheckIfGridIsInTriggerBox(ref MyOrientedBoundingBoxD box, MyCubeGrid grid)
+        internal static bool CheckIfGridIsInTriggerBox(ref MyOrientedBoundingBoxD box, MyCubeGrid grid)
         {
             List<MyEntity> intersectingEntities = new List<MyEntity>();
 
@@ -4749,7 +4505,7 @@ namespace Psycho.TradeLanes
             grid.WorldMatrix = newWorldMatrix;
         }
 
-        private void SetGridDirectionzzz(MyCubeGrid grid, MatrixD targetMatrix, float easingFactor = 0.1f)
+        internal static void SetGridDirectionzzz(MyCubeGrid grid, MatrixD targetMatrix, float easingFactor = 0.1f)
         {
             if (grid == null || grid.Physics == null || !grid.Physics.Enabled)
                 return;
@@ -5671,23 +5427,7 @@ namespace Psycho.TradeLanes
 
         private void InstructShipSystems(MyCubeGrid grid, CustomGridLogic.ShipSystem state)
         {
-            var logic = grid.GameLogic.GetAs<CustomGridLogic>();
-            if (logic == null)
-                return;
-            logic.ExecShipSystems(state);
-            TradeLaneNetwork.SendShipSystem(grid, state);
-
-            switch (state)
-            {
-                case CustomGridLogic.ShipSystem.TradeLaneFlight:
-                    TradeLaneNetwork.LockSeats(grid, true);
-                    break;
-                case CustomGridLogic.ShipSystem.CancelDocking:
-                case CustomGridLogic.ShipSystem.TradeLaneDisengage:
-                case CustomGridLogic.ShipSystem.TradeLaneBreakOff:
-                    TradeLaneNetwork.LockSeats(grid, false);
-                    break;
-            }
+            grid.GameLogic.GetAs<CustomGridLogic>()?.Instruct(state);
         }
 
         void ReadRingInterval()
@@ -5699,13 +5439,87 @@ namespace Psycho.TradeLanes
                 : DefaultRingInterval;
         }
 
-        // Server side: where the lane leads, from the paired computer
+        // Server side: where the lane leads. A Target: GPS in the Custom Data wins,
+        // then the paired computer if it is loaded, then where it was last seen.
         private void UpdateTarget()
         {
-            HasTarget = TargetBlock != null && !TargetBlock.MarkedForClose && TargetBlock.CubeGrid != null;
-            TargetPosition = HasTarget ? TargetBlock.WorldMatrix.Translation : Vector3D.Zero;
-            TargetGridPosition = HasTarget ? TargetBlock.CubeGrid.WorldMatrix.Translation : Vector3D.Zero;
-            TargetUp = HasTarget ? TargetBlock.CubeGrid.WorldMatrix.Up : Vector3D.Up;
+            if (TargetBlock != null && (TargetBlock.MarkedForClose || TargetBlock.CubeGrid == null))
+                TargetBlock = null;
+
+            Vector3D gps;
+            if (ReadTargetGps(out gps))
+            {
+                HasTarget = true;
+                TargetPosition = gps;
+                TargetGridPosition = gps;
+                TargetUp = Block.CubeGrid.WorldMatrix.Up;
+                InhertiRotation = false;
+                return;
+            }
+
+            var tlid = ReadCustomData(CustomData, TradeLaneIdKeyword, TradeLaneSeparator);
+            if (TargetBlock != null)
+            {
+                HasTarget = true;
+                TargetPosition = TargetBlock.WorldMatrix.Translation;
+                TargetGridPosition = TargetBlock.CubeGrid.WorldMatrix.Translation;
+                TargetUp = TargetBlock.CubeGrid.WorldMatrix.Up;
+                StoreTarget(tlid);
+                return;
+            }
+
+            var stored = ModStore.Load<StoredTarget>(Block, StoredTargetKey);
+            HasTarget = stored != null && stored.Tlid == tlid;
+            if (!HasTarget)
+                return;
+            TargetPosition = stored.Position;
+            TargetGridPosition = stored.GridPosition;
+            TargetUp = stored.Up;
+            InhertiRotation = stored.InheritRotation;
+        }
+
+        void StoreTarget(string tlid)
+        {
+            var stored = new StoredTarget
+            {
+                Tlid = tlid,
+                Position = TargetPosition,
+                GridPosition = TargetGridPosition,
+                Up = TargetUp,
+                InheritRotation = InhertiRotation,
+            };
+            var xml = MyAPIGateway.Utilities.SerializeToXML(stored);
+            if (xml == StoredTargetXml)
+                return;
+            StoredTargetXml = xml;
+            ModStore.Save(Block, StoredTargetKey, stored);
+        }
+
+        // Target:GPS:name:x:y:z:... in the Custom Data, for a lane whose far end is
+        // not loaded with this one. Best put last, the other keys are found by
+        // substring.
+        bool ReadTargetGps(out Vector3D position)
+        {
+            position = Vector3D.Zero;
+            var prefix = TradeLaneTargetGpsKeyword + TradeLaneSeparator;
+            foreach (var line in CustomData.Split('\n'))
+            {
+                var trimmed = line.Trim();
+                if (!trimmed.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var parts = trimmed.Substring(prefix.Length).Trim().Split(':');
+                double x, y, z;
+                if (parts.Length < 5 || !parts[0].Equals("GPS", StringComparison.OrdinalIgnoreCase)
+                    || !double.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out x)
+                    || !double.TryParse(parts[3], NumberStyles.Float, CultureInfo.InvariantCulture, out y)
+                    || !double.TryParse(parts[4], NumberStyles.Float, CultureInfo.InvariantCulture, out z))
+                    return false;
+
+                position = new Vector3D(x, y, z);
+                return true;
+            }
+            return false;
         }
 
         TradeLaneMessage LaneInfoMessage()

@@ -71,7 +71,7 @@ using VRage.Input;
 namespace Psycho.TradeLanes
 {
     [MyEntityComponentDescriptor(typeof(MyObjectBuilder_CubeGrid), false)]
-    public class CustomGridLogic : MyGameLogicComponent
+    public partial class CustomGridLogic : MyGameLogicComponent
     {
         // 79-80
         // 299-300
@@ -189,6 +189,9 @@ namespace Psycho.TradeLanes
 
         public override void Close()
         {
+            // A ship closed mid-trip keeps its trip and its seat lock: it may be
+            // going on on another server of a cluster
+            TradeLaneComputerBlockLogic.GridIgnore.Remove(Grid);
             StopSoundEmitter(ShipSoundEmitter, true);
             RemoveSoundEmitter(ref ShipSoundEmitter);
         }
@@ -215,6 +218,9 @@ namespace Psycho.TradeLanes
             //TradeLaneDockingSound = GetSoundPair(TradeLaneDockingSoundName);
 
             //MyAPIGateway.Input.ShowCursor(true);
+
+            if (MyAPIGateway.Session.IsServer)
+                ResumeTransit();
 
             NeedsUpdate = MyEntityUpdateEnum.EACH_FRAME | MyEntityUpdateEnum.EACH_100TH_FRAME;
         }
@@ -261,6 +267,8 @@ namespace Psycho.TradeLanes
         {
             try
             {
+                if (Transit != null)
+                    DriveTransit();
                 RunTime();
                 /*
                 if (!IgnoreLimits)

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Definitions xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <EntityComponents>
+    <!-- The game saves only claimed ModStorage keys, see Transit.cs -->
+    <EntityComponent xsi:type="MyObjectBuilder_ModStorageComponentDefinition">
+      <Id>
+        <TypeId>ModStorageComponent</TypeId>
+        <SubtypeId>TradeLanes</SubtypeId>
+      </Id>
+      <RegisteredStorageGuids>
+        <!-- A ship's trip through a lane -->
+        <guid>9de1a7eb-af07-4a4c-8423-a41c6ab04d2d</guid>
+        <!-- Where a Trade Lane Computer's lane leads -->
+        <guid>1e3f46c5-17fe-4f8b-89a1-4cd572165cba</guid>
+      </RegisteredStorageGuids>
+    </EntityComponent>
+  </EntityComponents>
+</Definitions>
