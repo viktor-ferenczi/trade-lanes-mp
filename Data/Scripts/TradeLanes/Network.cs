@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using ProtoBuf;
+using Sandbox.Game;
 using Sandbox.Game.Entities;
 using Sandbox.ModAPI;
 using VRage.Game.ModAPI;
@@ -14,11 +15,13 @@ using VRageMath;
 // rings and play the effects. What they cannot work out on their own comes from
 // the server through this channel:
 //
-// - LaneInfo: where a computer's lane leads. A client usually has only the near
-//   computer streamed in, so it cannot pair them itself.
+// - LaneInfo: where a lane starts and leads, and its Custom Data. A client draws
+//   the rings of every lane from a stand-in built from it (ClientLanes), since
+//   it has a computer only while it is within sync distance of it.
 // - ShipSystem: a state change of a ship in a lane, for its sounds and particles.
 // - GateEffect: particles on a ring when a ship requests docking or cancels it.
 // - Notification: HUD text and chat lines for the players aboard the ship.
+// - SeatLock: tells a client its USE control (F) is blocked while it travels.
 
 namespace Psycho.TradeLanes
 {
@@ -29,6 +32,7 @@ namespace Psycho.TradeLanes
         ShipSystem,
         GateEffect,
         Notification,
+        SeatLock,
     }
 
     public enum GateEffectKind
@@ -79,12 +83,26 @@ namespace Psycho.TradeLanes
         // and stays on the client's HUD this long after the last one
         const int StatusLifetimeMs = 300;
 
+        // A client asks for every lane on these frames after the session starts
+        static readonly int[] LaneRequestFrames = { 120, 1200 };
+
+        const string UseControl = "USE";
+
         static readonly Dictionary<long, int> StatusSentAt = new Dictionary<long, int>();
         static readonly List<IMyPlayer> Players = new List<IMyPlayer>();
+
+        // Server: the players whose seat is locked, per grid
+        static readonly Dictionary<long, List<IMyPlayer>> SeatLocks =
+            new Dictionary<long, List<IMyPlayer>>();
+
+        // Client: the stand-ins drawing the lanes, by computer block id
+        static readonly Dictionary<long, TradeLaneComputerBlockLogic> ClientLanes =
+            new Dictionary<long, TradeLaneComputerBlockLogic>();
 
         static int Frame;
         static string StatusText;
         static int StatusUntil;
+        static bool SeatLocked;
 
         public static bool IsServer => MyAPIGateway.Session.IsServer;
 
@@ -98,8 +116,16 @@ namespace Psycho.TradeLanes
         public static void Unload()
         {
             MyAPIGateway.Multiplayer.UnregisterSecureMessageHandler(Channel, OnMessage);
+            foreach (var lane in ClientLanes.Values)
+                lane.Close();
+            ClientLanes.Clear();
             StatusSentAt.Clear();
+            SeatLocks.Clear();
             StatusText = null;
+
+            // The block outlives the session, a client that left mid-travel would keep it
+            if (SeatLocked)
+                SetLocalSeatLock(false);
         }
 
         // Called every frame from the session component
@@ -113,43 +139,27 @@ namespace Psycho.TradeLanes
                 else
                     StatusText = null;
             }
+
+            if (IsServer)
+                return;
+
+            if (Array.IndexOf(LaneRequestFrames, Frame) >= 0)
+                RequestLaneInfo(0);
+
+            foreach (var lane in ClientLanes.Values)
+            {
+                lane.UpdateAfterSimulation();
+                if (Frame % 100 == 0)
+                    lane.UpdateAfterSimulation100();
+            }
         }
 
         #region Server side
 
-        public static void SendLaneInfo(
-            long computerId,
-            bool hasTarget,
-            bool inherit,
-            Vector3D target,
-            Vector3D targetGrid,
-            Vector3D targetUp,
-            ulong to = 0
-        )
+        public static void SendLaneInfo(TradeLaneMessage laneInfo, ulong to = 0)
         {
-            if (!IsServer || !IsMultiplayer)
-                return;
-
-            var message = new TradeLaneMessage
-            {
-                Kind = MessageKind.LaneInfo,
-                EntityId = computerId,
-                Flag = hasTarget,
-                Number = inherit ? 1 : 0,
-                Vectors = new[]
-                {
-                    target.X,
-                    target.Y,
-                    target.Z,
-                    targetGrid.X,
-                    targetGrid.Y,
-                    targetGrid.Z,
-                    targetUp.X,
-                    targetUp.Y,
-                    targetUp.Z,
-                },
-            };
-            Send(message, to);
+            if (IsServer && IsMultiplayer)
+                Send(laneInfo, to);
         }
 
         public static void SendShipSystem(IMyCubeGrid grid, CustomGridLogic.ShipSystem state)
@@ -251,12 +261,60 @@ namespace Psycho.TradeLanes
             Players.Clear();
         }
 
+        // Keeps the players seated on the grid in their seats: their USE control (F)
+        // is blocked until the grid leaves the lane. The game syncs the block to the
+        // player's client. Players who come aboard later are not locked.
+        public static void LockSeats(IMyCubeGrid grid, bool locked)
+        {
+            if (!IsServer || grid == null)
+                return;
+
+            List<IMyPlayer> players;
+            if (locked)
+            {
+                if (SeatLocks.ContainsKey(grid.EntityId))
+                    return;
+                players = new List<IMyPlayer>();
+                MyAPIGateway.Players.GetPlayers(players, player => IsSeated(player, grid));
+                SeatLocks[grid.EntityId] = players;
+            }
+            else
+            {
+                if (!SeatLocks.TryGetValue(grid.EntityId, out players))
+                    return;
+                SeatLocks.Remove(grid.EntityId);
+            }
+
+            foreach (var player in players)
+            {
+                MyVisualScriptLogicProvider.SetPlayerInputBlacklistState(
+                    UseControl,
+                    player.IdentityId,
+                    !locked
+                );
+
+                // So the client can lift it if the session ends mid-travel
+                if (player == MyAPIGateway.Session.Player)
+                    SeatLocked = locked;
+                else if (IsMultiplayer)
+                    Send(
+                        new TradeLaneMessage { Kind = MessageKind.SeatLock, Flag = locked },
+                        player.SteamUserId
+                    );
+            }
+        }
+
         static bool IsAboard(IMyPlayer player, IMyCubeGrid grid)
         {
             var controlled = player.Controller?.ControlledEntity?.Entity as IMyCubeBlock;
             if (controlled?.CubeGrid == grid)
                 return true;
 
+            return IsSeated(player, grid);
+        }
+
+        static bool IsSeated(IMyPlayer player, IMyCubeGrid grid)
+        {
             var seat = player.Character?.Parent as IMyCubeBlock;
             return seat?.CubeGrid == grid;
         }
@@ -274,7 +332,8 @@ namespace Psycho.TradeLanes
 
         #region Client side
 
-        // Asks the server where a computer's lane leads, the answer is a LaneInfo
+        // Asks the server where a computer's lane leads, 0 asks for every lane.
+        // The answer is a LaneInfo per lane.
         public static void RequestLaneInfo(long computerId)
         {
             if (IsServer)
@@ -284,6 +343,49 @@ namespace Psycho.TradeLanes
                 new TradeLaneMessage { Kind = MessageKind.LaneInfoRequest, EntityId = computerId }
             );
             MyAPIGateway.Multiplayer.SendMessageToServer(Channel, data);
+        }
+
+        static void ApplyLaneInfo(TradeLaneMessage message)
+        {
+            // The computer itself, when it is streamed in, only turns its grid
+            Computer(message.EntityId)?.ApplyLaneInfo(message);
+
+            TradeLaneComputerBlockLogic lane;
+            ClientLanes.TryGetValue(message.EntityId, out lane);
+            if (!message.Flag)
+            {
+                if (lane != null)
+                {
+                    lane.Close();
+                    ClientLanes.Remove(message.EntityId);
+                }
+                return;
+            }
+
+            if (lane == null)
+            {
+                lane = new TradeLaneComputerBlockLogic();
+                lane.InitStandIn();
+                ClientLanes[message.EntityId] = lane;
+            }
+            lane.ApplyLaneInfo(message);
+        }
+
+        static void SetLocalSeatLock(bool locked)
+        {
+            SeatLocked = locked;
+            try
+            {
+                MyVisualScriptLogicProvider.SetPlayerInputBlacklistState(
+                    UseControl,
+                    MyAPIGateway.Session?.Player?.IdentityId ?? -1,
+                    !locked
+                );
+            }
+            catch (Exception)
+            {
+                // The session is going away
+            }
         }
 
         static void ShowLocal(string text, int ms, string sender)
@@ -309,8 +411,17 @@ namespace Psycho.TradeLanes
 
                 if (message.Kind == MessageKind.LaneInfoRequest)
                 {
-                    if (IsServer)
+                    if (!IsServer)
+                        return;
+                    if (message.EntityId != 0)
+                    {
                         Computer(message.EntityId)?.SendLaneInfo(sender);
+                        return;
+                    }
+                    foreach (var block in TradeLaneComputerBlockLogic.TradeLanes)
+                        block
+                            ?.GameLogic?.GetAs<TradeLaneComputerBlockLogic>()
+                            ?.SendLaneInfo(sender);
                     return;
                 }
 
@@ -321,17 +432,7 @@ namespace Psycho.TradeLanes
                 switch (message.Kind)
                 {
                     case MessageKind.LaneInfo:
-                        var v = message.Vectors;
-                        if (v == null || v.Length < 9)
-                            return;
-                        Computer(message.EntityId)
-                            ?.SetLaneInfo(
-                                message.Flag,
-                                message.Number != 0,
-                                new Vector3D(v[0], v[1], v[2]),
-                                new Vector3D(v[3], v[4], v[5]),
-                                new Vector3D(v[6], v[7], v[8])
-                            );
+                        ApplyLaneInfo(message);
                         break;
 
                     case MessageKind.ShipSystem:
@@ -341,8 +442,9 @@ namespace Psycho.TradeLanes
                         break;
 
                     case MessageKind.GateEffect:
-                        Computer(message.EntityId)
-                            ?.GateEffect(
+                        TradeLaneComputerBlockLogic lane;
+                        if (ClientLanes.TryGetValue(message.EntityId, out lane))
+                            lane.GateEffect(
                                 message.Index,
                                 Entity(message.OtherId) as MyCubeGrid,
                                 (GateEffectKind)message.Number
@@ -359,6 +461,11 @@ namespace Psycho.TradeLanes
                         {
                             ShowLocal(message.Text, message.Number, message.Sender);
                         }
+                        break;
+
+                    case MessageKind.SeatLock:
+                        // The server already blocked the control, this only keeps track
+                        SeatLocked = message.Flag;
                         break;
                 }
             }

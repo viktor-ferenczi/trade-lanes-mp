@@ -172,6 +172,18 @@ namespace Psycho.TradeLanes
         Vector3D TargetGridPosition;
         Vector3D TargetUp;
         int LaneInfoRequestCountdown = 0;
+        string LaneInfoSent;
+
+        // On a client the rings of a lane are drawn by a stand-in: an instance with
+        // no block, made from the server's lane info and updated by TradeLaneNetwork.
+        // The computer itself is only there while it is within sync distance, and
+        // closing it would take the rings with it.
+        bool IsStandIn = false;
+        MatrixD StandInMatrix;
+        long StandInGridId;
+
+        MatrixD LaneMatrix => IsStandIn ? StandInMatrix : Block.WorldMatrix;
+        long LaneGridId => IsStandIn ? StandInGridId : Block.CubeGrid.EntityId;
 
         public string Location = "Uncharted";
 
@@ -410,21 +422,32 @@ namespace Psycho.TradeLanes
             NeedsUpdate |= MyEntityUpdateEnum.NONE;
             try
             {
-                Block.CustomDataChanged -= Block_CustomDataChanged;
-                //Block.PropertiesChanged -= Block_CustomDataChanged;
-                Block.CubeGridChanged -= Block_CubeGridChanged;
-
-                if (Block.CubeGrid != null && MyAPIGateway.Session.Player != null)
+                if (Block != null)
                 {
-                    var globalLaneIdent = $"Trade Lane Network\nID:{Block.CubeGrid.EntityId}";
+                    Block.CustomDataChanged -= Block_CustomDataChanged;
+                    //Block.PropertiesChanged -= Block_CustomDataChanged;
+                    Block.CubeGridChanged -= Block_CubeGridChanged;
+
+                    // The clients drop their stand-in of this lane
+                    if (TradeLaneNetwork.IsServer)
+                    {
+                        HasTarget = false;
+                        SendLaneInfo();
+                    }
+                }
+
+                bool ownsGps = IsStandIn || (TradeLaneNetwork.IsServer && Block?.CubeGrid != null);
+                if (ownsGps && MyAPIGateway.Session.Player != null)
+                {
+                    var globalLaneIdent = $"Trade Lane Network\nID:{LaneGridId}";
                     // Check if a GPS marker with the same name already exists
                     var existingGps = MyAPIGateway.Session.GPS.GetGpsList(MyAPIGateway.Session.Player.IdentityId).FirstOrDefault(gps => gps.Description.Contains(globalLaneIdent));
                     if (existingGps != null)
                         MyAPIGateway.Session.GPS.RemoveLocalGps(existingGps);
                 }
-                if (Block.CubeGrid != null && MyAPIGateway.Session.Player != null)
+                if (ownsGps && MyAPIGateway.Session.Player != null)
                 {
-                    var localLaneIdent = $"Trade Lane Information\nID:{Block.CubeGrid.EntityId}";
+                    var localLaneIdent = $"Trade Lane Information\nID:{LaneGridId}";
                     // Check if a GPS marker with the same name already exists
                     var existingGps = MyAPIGateway.Session.GPS.GetGpsList(MyAPIGateway.Session.Player.IdentityId).FirstOrDefault(gps => gps.Description.Contains(localLaneIdent));
                     if (existingGps != null)
@@ -744,6 +767,15 @@ namespace Psycho.TradeLanes
         {
             try
             {
+                if (IsStandIn)
+                {
+                    if (GateUpdateFrame > 0 && --GateUpdateFrame <= 0)
+                        UpdateGates();
+                    if (HasTarget)
+                        UpdateRings();
+                    return;
+                }
+
                 if (Block == null)
                     return;
 
@@ -940,6 +972,9 @@ namespace Psycho.TradeLanes
                     RotateGridTowardsTargetByBlockOrientationRefence(Block, TargetPosition, TargetGridPosition, TargetUp, InhertiRotation);
                 }
 
+                if (TradeLaneNetwork.IsServer)
+                    PublishLaneInfo();
+
                 /*
                 if (TargetBlock != null && TargetLane1_Dummy == null)
                 {
@@ -1039,237 +1074,11 @@ namespace Psycho.TradeLanes
                     return;
                 }
                 
-                // Get distance between first and last trade lane computers in meters.
-                var distnace = Vector3D.Distance(Block.WorldMatrix.Translation, TargetPosition);
+                // A client's rings are drawn by the lane's stand-in, see TradeLaneNetwork
+                if (!TradeLaneNetwork.IsServer)
+                    return;
 
-                var kilometers = distnace / 1000f;
-                float ringEveryKm = RingInterval / 1000f; // Roughly set a TL ring every X kilometers.
-
-                if (distnace >= ringEveryKm)
-                {
-                    //MyAPIGateway.Utilities.ShowMessage("ff", "Distance: " + distnace.ToString() + "m");
-                    //MyAPIGateway.Utilities.ShowMessage("ff", "calc: " + (MathHelper.RoundToInt(kilometers / ringEveryKm)).ToString());
-                    // Create location points for placing gates.
-                    //int ringEveryKilometer = 50; // Roughly set a TL ring every 10km.
-                    //var middleGateCount = MathHelper.RoundToInt(distnace / ringEveryKilometer);
-
-                    var ringCount = MathHelper.Clamp(MathHelper.RoundToInt(kilometers / ringEveryKm), 1, int.MaxValue);
-                    AddPointsBetweenGates(Block.WorldMatrix.Translation, TargetPosition, ref LaneGatePoints, ringCount);
-                }
-                else
-                    AddPointsBetweenGates(Block.WorldMatrix.Translation, TargetPosition, ref LaneGatePoints, 1);
-
-                GateCountHandler(ref LaneGates, ref LaneGatePoints);
-                GateCountHandler(ref LaneGatesParts1, ref LaneGatePoints, 1);
-
-                //GateCountHandler(ref LaneGatesParts2, ref LaneGatePoints, 2);
-                //GateCountHandler(ref LaneGatesParts3, ref LaneGatePoints, 3);
-
-                //return;
-                // Place the entities (gates) on the location points with offset.
-                // Currently I'm choosing the blocks Right offset since europe and we drive on right lane side.
-                // Although there is no side or orientation in space, there is if there is a reference point.
-                // Two lanes should be a reference points. Seems like in Freelancer <3 the gates are randomly either up or down,
-                // which always bugged me a little. Why in some systems/sectors the gates leading outwards are top ones and on some other systems it's the bottom gate??
-                // No explanation found online regarding that, so for my personal consistency sake between gates,
-                // outbound gates are on the RIGHT SIDE and inbound are LEFT.
-                if (LaneGates.Count > 0 && LaneGates.Count == LaneGatePoints.Count)
-                {
-                    if (!DoOnce)
-                    {
-                        MyEntity entity = LaneGates[0];
-                        if (entity == null)
-                        {
-                            MyAPIGateway.Utilities.ShowMessage("TRADE LANES UAS100", "entity was faulty");
-                            return;
-                        }
-                        var dummy = GetDummyByName(entity, "dummy_lane_detect_1");
-                        DetectDummyLocalMatrix = dummy.Matrix.Translation;
-                        DetectBoundingBox = new MyOrientedBoundingBoxD();
-                        CreateOBB(entity, dummy, out DetectBoundingBox);
-                        dummy = GetDummyByName(entity, "dummy_lane_dock_1");
-                        DockDummyLocalMatrix = dummy.Matrix.Translation;
-                        dummy = GetDummyByName(entity, "dummy_lane_prep_1");
-                        PrepDummyLocalMatrix = dummy.Matrix.Translation;
-                        dummy = GetDummyByName(entity, "dummy_lane_1");
-                        GateDummyLocalMatrix = dummy.Matrix.Translation;
-                        GateBoundingBox = new MyOrientedBoundingBoxD();
-                        CreateOBB(entity, dummy, out GateBoundingBox);
-
-                        DoOnce = true;
-                        //return;
-                    }
-                    //return;
-
-                    for (int i = 0; i < LaneGatePoints.Count; i++)
-                    {
-                        Vector3D loc = LaneGatePoints[i];
-                        //Vector3D loc = LaneGatePoints.ElementAt(i);
-                        if (loc == null || loc == Vector3D.Zero)
-                        {
-                            MyAPIGateway.Utilities.ShowMessage("TRADE LANES UAS100", "loc was faulty");
-                            break;
-                        }
-
-                        MyEntity ent = LaneGates[i];
-
-                        MyEntity ent1 = null;
-                        MyEntity ent2 = null;
-                        MyEntity ent3 = null;
-                        if (LaneGatesParts1.Count == LaneGatePoints.Count)
-                            ent1 = LaneGatesParts1[i];
-                        if (LaneGatesParts2.Count == LaneGatePoints.Count)
-                            ent2 = LaneGatesParts2[i];
-                        if (LaneGatesParts3.Count == LaneGatePoints.Count)
-                            ent3 = LaneGatesParts3[i];
-
-                        if (ent == null)
-                        {
-                            MyAPIGateway.Utilities.ShowMessage("TRADE LANES UAS100", "ent was faulty");
-                            break;
-                        }
-
-                        ent.WorldMatrix = MatrixD.CreateWorld(loc + (Block.WorldMatrix.Right * (RingOffset * RingScaleMult)), Block.WorldMatrix.Forward, Block.WorldMatrix.Up);
-                        if (ent1 != null)
-                            ent1.WorldMatrix = MatrixD.CreateWorld(loc + (Block.WorldMatrix.Right * (RingOffset * RingScaleMult)), Block.WorldMatrix.Forward, Block.WorldMatrix.Up);
-                        if (ent2 != null)
-                            ent2.WorldMatrix = MatrixD.CreateWorld(loc + (Block.WorldMatrix.Right * (RingOffset * RingScaleMult)), Block.WorldMatrix.Forward, Block.WorldMatrix.Up);
-                        if (ent3 != null)
-                            ent3.WorldMatrix = MatrixD.CreateWorld(loc + (Block.WorldMatrix.Right * (RingOffset * RingScaleMult)), Block.WorldMatrix.Forward, Block.WorldMatrix.Up);
-
-                        //var detectDummy = GetDummyByName(TargetLaneEntity, "dummy_lane_detect_1");
-                        //var dockDummy = GetDummyByName(TargetLaneEntity, "dummy_lane_dock_1");
-                        //var prepDummy = GetDummyByName(TargetLaneEntity, "dummy_lane_prep_1");
-                        //var gateDummy = GetDummyByName(TargetLaneEntity, "dummy_lane_1");
-
-                        if (!LaneDataDict.ContainsKey(ent))
-                            LaneDataDict[ent] = new LaneData();
-
-                        /*
-                        LaneDataDict[ent].DetectDummyLoc = Vector3D.Transform(detectDummy.Matrix.Translation, ent.WorldMatrix);
-                        LaneDataDict[ent].DockDummyLoc = Vector3D.Transform(dockDummy.Matrix.Translation, ent.WorldMatrix);
-                        LaneDataDict[ent].PrepDummyLoc = Vector3D.Transform(prepDummy.Matrix.Translation, ent.WorldMatrix);
-                        LaneDataDict[ent].GateDummyLoc = Vector3D.Transform(gateDummy.Matrix.Translation, ent.WorldMatrix);
-
-                        LaneDataDict[ent].DetectBox = new MyOrientedBoundingBoxD();
-                        CreateOBB(ent, detectDummy, out LaneDataDict[ent].DetectBox);
-                        CreateOBB(ent, gateDummy, out LaneDataDict[ent].GateBox);
-                        */
-                    }
-
-                    TargetLaneEntity = LaneGates[LaneGates.Count - 1];
-                    GateBoundingBox.Center = TargetLaneEntity.WorldMatrix.Translation;
-                    /*
-                    TargetLaneDummy = GetDummyByName(TargetLaneEntity, "dummy_lane_1");
-                    if (TargetLaneDummy != null)
-                    {
-                        TargetLaneDummyLocation = Vector3D.Transform(TargetLaneDummy.Matrix.Translation, TargetLaneEntity.WorldMatrix);
-                        CreateOBB(TargetLaneEntity, TargetLaneDummy, out TargetLaneGateBox);
-                    }
-                    */
-
-                    /*
-                    foreach (var gate in LaneGates)
-                    {
-                        if (Vector3D.DistanceSquared(MyAPIGateway.Session.Camera.Position, gate.WorldMatrix.Translation) > 10 * 10)
-                        //if (Vector3D.Distance(MyAPIGateway.Session.Player.Character.WorldMatrix.Translation, gate.WorldMatrix.Translation) > 10)
-                        {
-                            if (GateParticles.ContainsKey(gate))
-                                StopParticleEffects(GateParticles[gate]);
-                            else
-                                ResumeParticleEffects(GateParticles[gate]);
-                        }
-                    }
-                    */
-
-                    /*
-                    for (int i = LaneGates.Count - 1; i >= 0; i--)
-                    {
-                        var gate = LaneGates[i];
-                        if (gate != null)
-                        {
-                            if (GateParticles.ContainsKey(gate))
-                            {
-                                if (MyAPIGateway.Session?.Player?.Character != null && Vector3D.Distance(MyAPIGateway.Session.Player.Character.WorldMatrix.Translation, gate.WorldMatrix.Translation) > 10)
-                                {
-                                }
-                                    RemoveParticleEffects(GateParticles[gate], true);
-                                    GateParticles.Remove(gate);
-                            }
-                        }
-                    }
-                    */
-
-                    /*
-                    if (ent != null)
-                    {
-                        if (!GateParticles.ContainsKey(ent))
-                        {
-                            //RingParticles = SpawnParticleEffectsOnto(ent, RingActivationAndIdleParticleName, MatrixD.Identity);
-                            GateParticles[ent] = SpawnParticleEffectsOnto(ent, RingActivationAndIdleParticleName, MatrixD.Identity);
-                        }
-                        //GateParticles.Add(RingParticles);
-
-                        //var sound = SpawnSoundEmitter(ent as IMyEntity, "ArcDroneLoopSmall", 2f);
-                        //GateSounds[ent] = sound;
-                    }
-                    */
-
-                    if (MyAPIGateway.Session?.Player?.Character != null && MyAPIGateway.Session?.Camera != null)
-                    {
-                        foreach (var gate in LaneGates)
-                        {
-                            if (gate != null)
-                            {
-                                //if (Vector3D.Distance(MyAPIGateway.Session.Player.Character.WorldMatrix.Translation, gate.WorldMatrix.Translation) > ParticleDistance)
-                                if (Vector3D.DistanceSquared(MyAPIGateway.Session.Camera.Position, gate.WorldMatrix.Translation) > ParticleDistance * ParticleDistance)
-                                {
-                                    if (GateParticles.ContainsKey(gate))
-                                    {
-                                        RemoveParticleEffects(GateParticles[gate], true);
-                                        GateParticles.Remove(gate);
-                                    }
-                                }
-                                else
-                                {
-                                    if (!GateParticles.ContainsKey(gate))
-                                    {
-                                        //RingParticles = SpawnParticleEffectsOnto(ent, RingActivationAndIdleParticleName, MatrixD.Identity);
-                                        if (MyAPIGateway.Utilities.IsDedicated == false)
-                                            GateParticles[gate] = SpawnParticleEffectsOnto(gate, RingActivationAndIdleParticleName, MatrixD.Identity);
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    foreach (var gate in LaneGates)
-                    {
-                        //ArcDroneLoopSmall
-                        //ArcDroneLoopMedium
-                        //ArcDroneLoopLarge
-                        //ShipSmallRunSlow
-                        //ShipSmallRunMedium
-                        //ShipSmallEngine
-                        //ShipLargeIdle
-                        //ShipLargeRunLoop
-                        //ShipLargeEngine
-                        //ArcPlayJet
-                        //ArcPlayJetRun
-                        //RealPlayJet
-                        //ShipSmallRunSlow
-                        //var sound = SpawnSoundFX(gate, "ArcDroneLoopLarge", 0.8f, 500f);
-                        //var sound = SpawnSoundFX(gate, RingIdleSoundName, RingIdleSoundVolume, RingIdleSoundDistance);
-                        if (gate == null)
-                            continue;
-
-                        if (!LaneRingSounds.ContainsKey(gate))
-                        {
-                            if (MyAPIGateway.Utilities.IsDedicated == false)
-                                LaneRingSounds[gate] = SpawnSoundFX(gate, RingIdleSoundName, RingIdleSoundVolume, RingIdleSoundDistance);
-                        }
-                    }
-                }
+                UpdateRings();
 
                 /*
                 if (Lights != null && Lights.Count > 0)
@@ -1385,6 +1194,249 @@ namespace Psycho.TradeLanes
             catch (Exception e)
             {
                 MyAPIGateway.Utilities.ShowMessage("TRADE LANES UAS100", e.Message);
+            }
+        }
+
+        // Places the rings along the lane, creating or removing them as needed
+        void UpdateRings()
+        {
+            try
+            {
+                    // Get distance between first and last trade lane computers in meters.
+                    var distnace = Vector3D.Distance(LaneMatrix.Translation, TargetPosition);
+
+                    var kilometers = distnace / 1000f;
+                    float ringEveryKm = RingInterval / 1000f; // Roughly set a TL ring every X kilometers.
+
+                    if (distnace >= ringEveryKm)
+                    {
+                        //MyAPIGateway.Utilities.ShowMessage("ff", "Distance: " + distnace.ToString() + "m");
+                        //MyAPIGateway.Utilities.ShowMessage("ff", "calc: " + (MathHelper.RoundToInt(kilometers / ringEveryKm)).ToString());
+                        // Create location points for placing gates.
+                        //int ringEveryKilometer = 50; // Roughly set a TL ring every 10km.
+                        //var middleGateCount = MathHelper.RoundToInt(distnace / ringEveryKilometer);
+
+                        var ringCount = MathHelper.Clamp(MathHelper.RoundToInt(kilometers / ringEveryKm), 1, int.MaxValue);
+                        AddPointsBetweenGates(LaneMatrix.Translation, TargetPosition, ref LaneGatePoints, ringCount);
+                    }
+                    else
+                        AddPointsBetweenGates(LaneMatrix.Translation, TargetPosition, ref LaneGatePoints, 1);
+
+                    GateCountHandler(ref LaneGates, ref LaneGatePoints);
+                    GateCountHandler(ref LaneGatesParts1, ref LaneGatePoints, 1);
+
+                    //GateCountHandler(ref LaneGatesParts2, ref LaneGatePoints, 2);
+                    //GateCountHandler(ref LaneGatesParts3, ref LaneGatePoints, 3);
+
+                    //return;
+                    // Place the entities (gates) on the location points with offset.
+                    // Currently I'm choosing the blocks Right offset since europe and we drive on right lane side.
+                    // Although there is no side or orientation in space, there is if there is a reference point.
+                    // Two lanes should be a reference points. Seems like in Freelancer <3 the gates are randomly either up or down,
+                    // which always bugged me a little. Why in some systems/sectors the gates leading outwards are top ones and on some other systems it's the bottom gate??
+                    // No explanation found online regarding that, so for my personal consistency sake between gates,
+                    // outbound gates are on the RIGHT SIDE and inbound are LEFT.
+                    if (LaneGates.Count > 0 && LaneGates.Count == LaneGatePoints.Count)
+                    {
+                        if (!DoOnce)
+                        {
+                            MyEntity entity = LaneGates[0];
+                            if (entity == null)
+                            {
+                                MyAPIGateway.Utilities.ShowMessage("TRADE LANES UAS100", "entity was faulty");
+                                return;
+                            }
+                            var dummy = GetDummyByName(entity, "dummy_lane_detect_1");
+                            DetectDummyLocalMatrix = dummy.Matrix.Translation;
+                            DetectBoundingBox = new MyOrientedBoundingBoxD();
+                            CreateOBB(entity, dummy, out DetectBoundingBox);
+                            dummy = GetDummyByName(entity, "dummy_lane_dock_1");
+                            DockDummyLocalMatrix = dummy.Matrix.Translation;
+                            dummy = GetDummyByName(entity, "dummy_lane_prep_1");
+                            PrepDummyLocalMatrix = dummy.Matrix.Translation;
+                            dummy = GetDummyByName(entity, "dummy_lane_1");
+                            GateDummyLocalMatrix = dummy.Matrix.Translation;
+                            GateBoundingBox = new MyOrientedBoundingBoxD();
+                            CreateOBB(entity, dummy, out GateBoundingBox);
+
+                            DoOnce = true;
+                            //return;
+                        }
+                        //return;
+
+                        for (int i = 0; i < LaneGatePoints.Count; i++)
+                        {
+                            Vector3D loc = LaneGatePoints[i];
+                            //Vector3D loc = LaneGatePoints.ElementAt(i);
+                            if (loc == null || loc == Vector3D.Zero)
+                            {
+                                MyAPIGateway.Utilities.ShowMessage("TRADE LANES UAS100", "loc was faulty");
+                                break;
+                            }
+
+                            MyEntity ent = LaneGates[i];
+
+                            MyEntity ent1 = null;
+                            MyEntity ent2 = null;
+                            MyEntity ent3 = null;
+                            if (LaneGatesParts1.Count == LaneGatePoints.Count)
+                                ent1 = LaneGatesParts1[i];
+                            if (LaneGatesParts2.Count == LaneGatePoints.Count)
+                                ent2 = LaneGatesParts2[i];
+                            if (LaneGatesParts3.Count == LaneGatePoints.Count)
+                                ent3 = LaneGatesParts3[i];
+
+                            if (ent == null)
+                            {
+                                MyAPIGateway.Utilities.ShowMessage("TRADE LANES UAS100", "ent was faulty");
+                                break;
+                            }
+
+                            ent.WorldMatrix = MatrixD.CreateWorld(loc + (LaneMatrix.Right * (RingOffset * RingScaleMult)), LaneMatrix.Forward, LaneMatrix.Up);
+                            if (ent1 != null)
+                                ent1.WorldMatrix = MatrixD.CreateWorld(loc + (LaneMatrix.Right * (RingOffset * RingScaleMult)), LaneMatrix.Forward, LaneMatrix.Up);
+                            if (ent2 != null)
+                                ent2.WorldMatrix = MatrixD.CreateWorld(loc + (LaneMatrix.Right * (RingOffset * RingScaleMult)), LaneMatrix.Forward, LaneMatrix.Up);
+                            if (ent3 != null)
+                                ent3.WorldMatrix = MatrixD.CreateWorld(loc + (LaneMatrix.Right * (RingOffset * RingScaleMult)), LaneMatrix.Forward, LaneMatrix.Up);
+
+                            //var detectDummy = GetDummyByName(TargetLaneEntity, "dummy_lane_detect_1");
+                            //var dockDummy = GetDummyByName(TargetLaneEntity, "dummy_lane_dock_1");
+                            //var prepDummy = GetDummyByName(TargetLaneEntity, "dummy_lane_prep_1");
+                            //var gateDummy = GetDummyByName(TargetLaneEntity, "dummy_lane_1");
+
+                            if (!LaneDataDict.ContainsKey(ent))
+                                LaneDataDict[ent] = new LaneData();
+
+                            /*
+                            LaneDataDict[ent].DetectDummyLoc = Vector3D.Transform(detectDummy.Matrix.Translation, ent.WorldMatrix);
+                            LaneDataDict[ent].DockDummyLoc = Vector3D.Transform(dockDummy.Matrix.Translation, ent.WorldMatrix);
+                            LaneDataDict[ent].PrepDummyLoc = Vector3D.Transform(prepDummy.Matrix.Translation, ent.WorldMatrix);
+                            LaneDataDict[ent].GateDummyLoc = Vector3D.Transform(gateDummy.Matrix.Translation, ent.WorldMatrix);
+
+                            LaneDataDict[ent].DetectBox = new MyOrientedBoundingBoxD();
+                            CreateOBB(ent, detectDummy, out LaneDataDict[ent].DetectBox);
+                            CreateOBB(ent, gateDummy, out LaneDataDict[ent].GateBox);
+                            */
+                        }
+
+                        TargetLaneEntity = LaneGates[LaneGates.Count - 1];
+                        GateBoundingBox.Center = TargetLaneEntity.WorldMatrix.Translation;
+                        /*
+                        TargetLaneDummy = GetDummyByName(TargetLaneEntity, "dummy_lane_1");
+                        if (TargetLaneDummy != null)
+                        {
+                            TargetLaneDummyLocation = Vector3D.Transform(TargetLaneDummy.Matrix.Translation, TargetLaneEntity.WorldMatrix);
+                            CreateOBB(TargetLaneEntity, TargetLaneDummy, out TargetLaneGateBox);
+                        }
+                        */
+
+                        /*
+                        foreach (var gate in LaneGates)
+                        {
+                            if (Vector3D.DistanceSquared(MyAPIGateway.Session.Camera.Position, gate.WorldMatrix.Translation) > 10 * 10)
+                            //if (Vector3D.Distance(MyAPIGateway.Session.Player.Character.WorldMatrix.Translation, gate.WorldMatrix.Translation) > 10)
+                            {
+                                if (GateParticles.ContainsKey(gate))
+                                    StopParticleEffects(GateParticles[gate]);
+                                else
+                                    ResumeParticleEffects(GateParticles[gate]);
+                            }
+                        }
+                        */
+
+                        /*
+                        for (int i = LaneGates.Count - 1; i >= 0; i--)
+                        {
+                            var gate = LaneGates[i];
+                            if (gate != null)
+                            {
+                                if (GateParticles.ContainsKey(gate))
+                                {
+                                    if (MyAPIGateway.Session?.Player?.Character != null && Vector3D.Distance(MyAPIGateway.Session.Player.Character.WorldMatrix.Translation, gate.WorldMatrix.Translation) > 10)
+                                    {
+                                    }
+                                        RemoveParticleEffects(GateParticles[gate], true);
+                                        GateParticles.Remove(gate);
+                                }
+                            }
+                        }
+                        */
+
+                        /*
+                        if (ent != null)
+                        {
+                            if (!GateParticles.ContainsKey(ent))
+                            {
+                                //RingParticles = SpawnParticleEffectsOnto(ent, RingActivationAndIdleParticleName, MatrixD.Identity);
+                                GateParticles[ent] = SpawnParticleEffectsOnto(ent, RingActivationAndIdleParticleName, MatrixD.Identity);
+                            }
+                            //GateParticles.Add(RingParticles);
+
+                            //var sound = SpawnSoundEmitter(ent as IMyEntity, "ArcDroneLoopSmall", 2f);
+                            //GateSounds[ent] = sound;
+                        }
+                        */
+
+                        if (MyAPIGateway.Session?.Player?.Character != null && MyAPIGateway.Session?.Camera != null)
+                        {
+                            foreach (var gate in LaneGates)
+                            {
+                                if (gate != null)
+                                {
+                                    //if (Vector3D.Distance(MyAPIGateway.Session.Player.Character.WorldMatrix.Translation, gate.WorldMatrix.Translation) > ParticleDistance)
+                                    if (Vector3D.DistanceSquared(MyAPIGateway.Session.Camera.Position, gate.WorldMatrix.Translation) > ParticleDistance * ParticleDistance)
+                                    {
+                                        if (GateParticles.ContainsKey(gate))
+                                        {
+                                            RemoveParticleEffects(GateParticles[gate], true);
+                                            GateParticles.Remove(gate);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        if (!GateParticles.ContainsKey(gate))
+                                        {
+                                            //RingParticles = SpawnParticleEffectsOnto(ent, RingActivationAndIdleParticleName, MatrixD.Identity);
+                                            if (MyAPIGateway.Utilities.IsDedicated == false)
+                                                GateParticles[gate] = SpawnParticleEffectsOnto(gate, RingActivationAndIdleParticleName, MatrixD.Identity);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        foreach (var gate in LaneGates)
+                        {
+                            //ArcDroneLoopSmall
+                            //ArcDroneLoopMedium
+                            //ArcDroneLoopLarge
+                            //ShipSmallRunSlow
+                            //ShipSmallRunMedium
+                            //ShipSmallEngine
+                            //ShipLargeIdle
+                            //ShipLargeRunLoop
+                            //ShipLargeEngine
+                            //ArcPlayJet
+                            //ArcPlayJetRun
+                            //RealPlayJet
+                            //ShipSmallRunSlow
+                            //var sound = SpawnSoundFX(gate, "ArcDroneLoopLarge", 0.8f, 500f);
+                            //var sound = SpawnSoundFX(gate, RingIdleSoundName, RingIdleSoundVolume, RingIdleSoundDistance);
+                            if (gate == null)
+                                continue;
+
+                            if (!LaneRingSounds.ContainsKey(gate))
+                            {
+                                if (MyAPIGateway.Utilities.IsDedicated == false)
+                                    LaneRingSounds[gate] = SpawnSoundFX(gate, RingIdleSoundName, RingIdleSoundVolume, RingIdleSoundDistance);
+                            }
+                        }
+                    }
+            }
+            catch (Exception e)
+            {
+                MyAPIGateway.Utilities.ShowMessage("TRADE LANES UpdateRings", e.Message);
             }
         }
 
@@ -1512,11 +1564,7 @@ namespace Psycho.TradeLanes
                     ? MathHelper.Clamp(superluminalSpeed, 500f, 500000f)
                     : DefaultSuperluminalSpeed;
 
-                float ringInterval;
-                var interval = ReadCustomData(CustomData, TradeLaneRingIntervalKeyword, TradeLaneSeparator);
-                RingInterval = float.TryParse(interval, out ringInterval)
-                    ? MathHelper.Clamp(ringInterval, 1000f, 1000000f)
-                    : DefaultRingInterval;
+                ReadRingInterval();
 
                 if (SafeZoneEnabled)
                     UpdateSafeZone();
@@ -2410,7 +2458,7 @@ namespace Psycho.TradeLanes
                     }
                 }
 
-                if (Block.CubeGrid.Physics != null)
+                if (IsStandIn || Block.CubeGrid.Physics != null)
                 {
                     if (GpsRefreshFrame > 0 && --GpsRefreshFrame <= 0)
                     {
@@ -2454,7 +2502,7 @@ namespace Psycho.TradeLanes
                         RemoveGpsMarker();
                     }
 
-                    GpsMarkers(Block.WorldMatrix.Translation, id, from, to);
+                    GpsMarkers(LaneMatrix.Translation, id, from, to);
                     //UpdateGpsDistancesIndex(id, from, to);
                     /*
                     var existingGps = MyAPIGateway.Session.GPS.GetGpsList(MyAPIGateway.Session.Player.IdentityId);
@@ -2491,7 +2539,7 @@ namespace Psycho.TradeLanes
                 return;
 
             var globalGps = $"Trade Lane {id} | {from}-{to}";
-            var globalLaneIdent = $"Trade Lane Network\nID:{Block.CubeGrid.EntityId}";
+            var globalLaneIdent = $"Trade Lane Network\nID:{LaneGridId}";
 
             Vector3D characterLocation = MyAPIGateway.Session.Player.Character.WorldMatrix.Translation;
 
@@ -2530,12 +2578,12 @@ namespace Psycho.TradeLanes
 
         private void AddGpsMarker(Vector3D translation, string id, string from, string to)
         {
-            if (Block.CubeGrid == null || Block.CubeGrid.Physics == null || MyAPIGateway.Session?.Player == null)
+            if ((!IsStandIn && (Block.CubeGrid == null || Block.CubeGrid.Physics == null)) || MyAPIGateway.Session?.Player == null)
                 return;
 
             //var localGpsName = $"Trade Lane {id}\nFrom {from}\nTo {to}";
             var localGpsName = $"TL{id} | {from} > {to}";
-            var localLaneIdent = $"Trade Lane Information\nID:{Block.CubeGrid.EntityId}";
+            var localLaneIdent = $"Trade Lane Information\nID:{LaneGridId}";
 
             var existingGps = MyAPIGateway.Session.GPS.GetGpsList(MyAPIGateway.Session.Player.IdentityId)
             .FirstOrDefault(gps => gps.Description.Contains(localLaneIdent));
@@ -2568,10 +2616,10 @@ namespace Psycho.TradeLanes
         private void RemoveGpsMarker()
         {
             //return;
-            if (Block.CubeGrid == null || MyAPIGateway.Session?.Player == null)
+            if ((!IsStandIn && Block.CubeGrid == null) || MyAPIGateway.Session?.Player == null)
                 return;
             //MyAPIGateway.Utilities.ShowNotification("remove");
-            var localLaneIdent = $"Trade Lane Information\nID:{Block.CubeGrid.EntityId}";
+            var localLaneIdent = $"Trade Lane Information\nID:{LaneGridId}";
             var existingGps = MyAPIGateway.Session.GPS.GetGpsList(MyAPIGateway.Session.Player.IdentityId)
             .FirstOrDefault(gps => gps.Description.Contains(localLaneIdent));
             if (existingGps != null)
@@ -2588,16 +2636,16 @@ namespace Psycho.TradeLanes
             var globalGps = $"Trade Lane {id} | {from}-{to}";
             var localGps = $"Trade Lane {id}\nFrom {from}\nTo {to}";
 
-            var dist = MathHelper.RoundOn2((float)Vector3D.Distance(MyAPIGateway.Session.Player.Character.WorldMatrix.Translation, Block.WorldMatrix.Translation));
+            var dist = MathHelper.RoundOn2((float)Vector3D.Distance(MyAPIGateway.Session.Player.Character.WorldMatrix.Translation, LaneMatrix.Translation));
 
             //GpsMarkers.Clear();
 
-            if (string.IsNullOrEmpty(id) == false && string.IsNullOrEmpty(from) == false && string.IsNullOrEmpty(to) == false && Block.CubeGrid != null)
+            if (string.IsNullOrEmpty(id) == false && string.IsNullOrEmpty(from) == false && string.IsNullOrEmpty(to) == false && (IsStandIn || Block.CubeGrid != null))
             {
-                var gridId = Block.CubeGrid.EntityId;
+                var gridId = LaneGridId;
 
-                var globalLaneIdent = $"Trade Lane Network\nID:{Block.CubeGrid.EntityId}";
-                var localLaneIdent = $"Trade Lane Information\nID:{Block.CubeGrid.EntityId}";
+                var globalLaneIdent = $"Trade Lane Network\nID:{LaneGridId}";
+                var localLaneIdent = $"Trade Lane Information\nID:{LaneGridId}";
 
                 /*
                 if (GpsMarkers.Contains(globalGps) == false)
@@ -5628,38 +5676,113 @@ namespace Psycho.TradeLanes
                 return;
             logic.ExecShipSystems(state);
             TradeLaneNetwork.SendShipSystem(grid, state);
+
+            switch (state)
+            {
+                case CustomGridLogic.ShipSystem.TradeLaneFlight:
+                    TradeLaneNetwork.LockSeats(grid, true);
+                    break;
+                case CustomGridLogic.ShipSystem.CancelDocking:
+                case CustomGridLogic.ShipSystem.TradeLaneDisengage:
+                case CustomGridLogic.ShipSystem.TradeLaneBreakOff:
+                    TradeLaneNetwork.LockSeats(grid, false);
+                    break;
+            }
+        }
+
+        void ReadRingInterval()
+        {
+            float ringInterval;
+            var interval = ReadCustomData(CustomData, TradeLaneRingIntervalKeyword, TradeLaneSeparator);
+            RingInterval = float.TryParse(interval, out ringInterval)
+                ? MathHelper.Clamp(ringInterval, 1000f, 1000000f)
+                : DefaultRingInterval;
         }
 
         // Server side: where the lane leads, from the paired computer
         private void UpdateTarget()
         {
-            bool hasTarget = TargetBlock != null && !TargetBlock.MarkedForClose && TargetBlock.CubeGrid != null;
-            var target = hasTarget ? TargetBlock.WorldMatrix.Translation : Vector3D.Zero;
-            var targetGrid = hasTarget ? TargetBlock.CubeGrid.WorldMatrix.Translation : Vector3D.Zero;
-            var targetUp = hasTarget ? TargetBlock.CubeGrid.WorldMatrix.Up : Vector3D.Up;
-            bool changed = hasTarget != HasTarget || target != TargetPosition || targetGrid != TargetGridPosition || targetUp != TargetUp;
-            HasTarget = hasTarget;
-            TargetPosition = target;
-            TargetGridPosition = targetGrid;
-            TargetUp = targetUp;
-            if (changed)
-                SendLaneInfo();
+            HasTarget = TargetBlock != null && !TargetBlock.MarkedForClose && TargetBlock.CubeGrid != null;
+            TargetPosition = HasTarget ? TargetBlock.WorldMatrix.Translation : Vector3D.Zero;
+            TargetGridPosition = HasTarget ? TargetBlock.CubeGrid.WorldMatrix.Translation : Vector3D.Zero;
+            TargetUp = HasTarget ? TargetBlock.CubeGrid.WorldMatrix.Up : Vector3D.Up;
+        }
+
+        TradeLaneMessage LaneInfoMessage()
+        {
+            var m = Block.WorldMatrix;
+            return new TradeLaneMessage
+            {
+                Kind = MessageKind.LaneInfo,
+                EntityId = Block.EntityId,
+                OtherId = Block.CubeGrid?.EntityId ?? 0,
+                Flag = HasTarget,
+                Number = InhertiRotation ? 1 : 0,
+                Text = CustomData,
+                Vectors = new[]
+                {
+                    TargetPosition.X, TargetPosition.Y, TargetPosition.Z,
+                    TargetGridPosition.X, TargetGridPosition.Y, TargetGridPosition.Z,
+                    TargetUp.X, TargetUp.Y, TargetUp.Z,
+                    m.Translation.X, m.Translation.Y, m.Translation.Z,
+                    m.Forward.X, m.Forward.Y, m.Forward.Z,
+                    m.Up.X, m.Up.Y, m.Up.Z,
+                },
+            };
+        }
+
+        // Server side: tells the clients when anything about the lane changed
+        private void PublishLaneInfo()
+        {
+            var m = Block.WorldMatrix;
+            var info = $"{HasTarget}|{InhertiRotation}|{TargetPosition}|{TargetGridPosition}|{TargetUp}|{m.Translation}|{m.Forward}|{m.Up}|{CustomData}";
+            if (info == LaneInfoSent)
+                return;
+            LaneInfoSent = info;
+            SendLaneInfo();
         }
 
         public void SendLaneInfo(ulong to = 0)
         {
             if (Block != null)
-                TradeLaneNetwork.SendLaneInfo(Block.EntityId, HasTarget, InhertiRotation, TargetPosition, TargetGridPosition, TargetUp, to);
+                TradeLaneNetwork.SendLaneInfo(LaneInfoMessage(), to);
         }
 
-        // Client side: the server told where the lane leads
-        public void SetLaneInfo(bool hasTarget, bool inherit, Vector3D target, Vector3D targetGrid, Vector3D targetUp)
+        // Client side: makes this a stand-in drawing the rings of a lane
+        public void InitStandIn()
         {
-            HasTarget = hasTarget;
-            InhertiRotation = inherit;
-            TargetPosition = target;
-            TargetGridPosition = targetGrid;
-            TargetUp = targetUp;
+            IsStandIn = true;
+            var modPath = TradeLaneSystem.Instance.ModContext.ModPath;
+            TradeLane_Model = modPath + TradeLane_Model;
+            TradeLane_Lights_Front_Model = modPath + TradeLane_Lights_Front_Model;
+            TradeLane_Lights_Back_Model = modPath + TradeLane_Lights_Back_Model;
+            TradeLane_Ring_Model = modPath + TradeLane_Ring_Model;
+        }
+
+        // Client side: the server told where the lane starts and leads
+        public void ApplyLaneInfo(TradeLaneMessage message)
+        {
+            var v = message.Vectors;
+            if (v == null || v.Length < 18)
+                return;
+
+            HasTarget = message.Flag;
+            InhertiRotation = message.Number != 0;
+            TargetPosition = new Vector3D(v[0], v[1], v[2]);
+            TargetGridPosition = new Vector3D(v[3], v[4], v[5]);
+            TargetUp = new Vector3D(v[6], v[7], v[8]);
+
+            if (!IsStandIn)
+                return;
+
+            StandInMatrix = MatrixD.CreateWorld(new Vector3D(v[9], v[10], v[11]), new Vector3D(v[12], v[13], v[14]), new Vector3D(v[15], v[16], v[17]));
+            StandInGridId = message.OtherId;
+            if (message.Text != CustomData)
+            {
+                CustomData = message.Text ?? "";
+                ReadRingInterval();
+                UpdateGates();
+            }
         }
 
         // Plays a ring effect here, unless this is a dedicated server, and on every client
