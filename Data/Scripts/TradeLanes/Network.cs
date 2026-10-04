@@ -122,9 +122,8 @@ namespace Psycho.TradeLanes
             StatusSentAt.Clear();
             StatusText = null;
 
-            // The block outlives the session, a client that left mid-travel would keep it
-            if (SeatLocked)
-                SetLocalSeatLock(false);
+            // No need to lift the F block: MySession.Unload clears every input block
+            SeatLocked = false;
         }
 
         // Called every frame from the session component
@@ -405,23 +404,6 @@ namespace Psycho.TradeLanes
                         new TradeLaneMessage { Kind = MessageKind.SeatUnlockRequest }
                     )
                 );
-        }
-
-        static void SetLocalSeatLock(bool locked)
-        {
-            SeatLocked = locked;
-            try
-            {
-                MyVisualScriptLogicProvider.SetPlayerInputBlacklistState(
-                    UseControl,
-                    MyAPIGateway.Session?.Player?.IdentityId ?? -1,
-                    !locked
-                );
-            }
-            catch (Exception)
-            {
-                // The session is going away
-            }
         }
 
         static void ShowLocal(string text, int ms, string sender)
