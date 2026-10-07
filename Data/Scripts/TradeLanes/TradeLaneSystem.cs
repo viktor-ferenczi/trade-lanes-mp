@@ -124,6 +124,7 @@ namespace Psycho.TradeLanes
             SetUpdateOrder(MyUpdateOrder.AfterSimulation);
 
             TradeLaneNetwork.Load();
+            LaneRegistry.Load();
 
             // crahses!!
             /*
@@ -146,6 +147,7 @@ namespace Psycho.TradeLanes
         {
             //base.UnloadData();
             TradeLaneNetwork.Unload();
+            LaneRegistry.Unload();
             Instance = null;
         }
 
@@ -154,6 +156,8 @@ namespace Psycho.TradeLanes
         public override void UpdateAfterSimulation()
         {
             TradeLaneNetwork.Update();
+            if (TradeLaneNetwork.IsServer)
+                LaneRegistry.Update();
 
             if (!DoOnce)
             {

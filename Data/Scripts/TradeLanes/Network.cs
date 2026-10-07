@@ -25,6 +25,10 @@ using VRageMath;
 // - SeatLock: tells a client its USE control (F) is blocked while it travels.
 // - SeatUnlockRequest: a client whose pilot is out of the seat anyway asks the
 //   server to lift that block, only the server can.
+// - Command: an admin's /tradelanes chat command, run on the server.
+//
+// On a cluster a node also sends the lanes it knows from the lane registry
+// (Registry.cs), whose computers are loaded elsewhere or not at all.
 
 namespace Psycho.TradeLanes
 {
@@ -37,6 +41,7 @@ namespace Psycho.TradeLanes
         Notification,
         SeatLock,
         SeatUnlockRequest,
+        Command,
     }
 
     public enum GateEffectKind
@@ -111,11 +116,13 @@ namespace Psycho.TradeLanes
         public static void Load()
         {
             MyAPIGateway.Multiplayer.RegisterSecureMessageHandler(Channel, OnMessage);
+            MyAPIGateway.Utilities.MessageEnteredSender += OnChat;
         }
 
         public static void Unload()
         {
             MyAPIGateway.Multiplayer.UnregisterSecureMessageHandler(Channel, OnMessage);
+            MyAPIGateway.Utilities.MessageEnteredSender -= OnChat;
             foreach (var lane in ClientLanes.Values)
                 lane.Close();
             ClientLanes.Clear();
@@ -433,13 +440,25 @@ namespace Psycho.TradeLanes
                         return;
                     if (message.EntityId != 0)
                     {
-                        Computer(message.EntityId)?.SendLaneInfo(sender);
+                        var computer = Computer(message.EntityId);
+                        if (computer != null)
+                            computer.SendLaneInfo(sender);
+                        else
+                            LaneRegistry.SendLaneInfo(message.EntityId, sender);
                         return;
                     }
                     foreach (var block in TradeLaneComputerBlockLogic.TradeLanes)
                         block
                             ?.GameLogic?.GetAs<TradeLaneComputerBlockLogic>()
                             ?.SendLaneInfo(sender);
+                    LaneRegistry.SendLaneInfos(sender);
+                    return;
+                }
+
+                if (message.Kind == MessageKind.Command)
+                {
+                    if (IsServer)
+                        RunCommand(sender, message.Text);
                     return;
                 }
 
@@ -509,6 +528,57 @@ namespace Psycho.TradeLanes
             {
                 MyAPIGateway.Utilities.ShowMessage("TRADE LANES Network", e.Message);
             }
+        }
+
+        // /tradelanes forget <TLID>: drops every computer of the lane from the
+        // cluster's lane registry, for a computer whose whole grid was deleted.
+        // The registry cannot tell that from a grid unloading on its node.
+        static void OnChat(ulong sender, string text, ref bool sendToOthers)
+        {
+            if (!text.StartsWith("/tradelanes", StringComparison.OrdinalIgnoreCase))
+                return;
+            sendToOthers = false;
+            if (IsServer)
+                RunCommand(sender, text);
+            else
+                MyAPIGateway.Multiplayer.SendMessageToServer(
+                    Channel,
+                    MyAPIGateway.Utilities.SerializeToBinary(
+                        new TradeLaneMessage { Kind = MessageKind.Command, Text = text }
+                    )
+                );
+        }
+
+        static void RunCommand(ulong sender, string text)
+        {
+            string answer;
+            var words = text.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            var local =
+                MyAPIGateway.Session.Player != null
+                && MyAPIGateway.Session.Player.SteamUserId == sender;
+            if (!local && MyAPIGateway.Session.GetUserPromoteLevel(sender) < MyPromoteLevel.Admin)
+                answer = "Only an admin can do that.";
+            else if (
+                words.Length == 3
+                && words[1].Equals("forget", StringComparison.OrdinalIgnoreCase)
+            )
+                answer = LaneRegistry.Forget(words[2]);
+            else
+                answer = "Usage: /tradelanes forget <TLID>";
+
+            MyLog.Default.WriteLine($"TradeLanes: {sender} ran '{text}': {answer}");
+            if (local)
+                ShowLocal(answer, 0, "Trade Lanes");
+            else
+                Send(
+                    new TradeLaneMessage
+                    {
+                        Kind = MessageKind.Notification,
+                        Text = answer,
+                        Sender = "Trade Lanes",
+                    },
+                    sender
+                );
         }
 
         static IMyEntity Entity(long id)
