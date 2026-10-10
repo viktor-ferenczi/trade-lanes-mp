@@ -119,7 +119,6 @@ namespace Psycho.TradeLanes
         string TradeLaneSeparator = ":";
         string TradeLaneHomeKeyword = "From";
         string TradeLaneTargetKeyword = "To";
-        string TradeLaneTargetGpsKeyword = "Target";
         string TradeLaneSpeedKeyword = "Speed";
         string TradeLaneRingScaleKeyword = "RingSize";
         string TradeLaneComputerSafeZoneRadiusKeyword = "SafeZoneRadius";
@@ -188,7 +187,19 @@ namespace Psycho.TradeLanes
             public SerializableVector3D GridPosition;
             public SerializableVector3D Up;
             public bool InheritRotation;
+            // The partner's block id, 0 in targets stored before the lane registry
+            public long PartnerId;
         }
+
+        // Where the target came from, for the lane registry (Registry.cs)
+        bool TargetFromGps;
+        bool TargetFromRegistry;
+
+        // Ground down or cut from its grid, not closed with the grid
+        bool RemovedFromGrid;
+
+        // The target source last logged
+        string TargetSource;
         int LaneInfoRequestCountdown = 0;
         string LaneInfoSent;
 
@@ -431,6 +442,13 @@ namespace Psycho.TradeLanes
             NeedsUpdate = MyEntityUpdateEnum.BEFORE_NEXT_FRAME;
         }
 
+        public override void MarkForClose()
+        {
+            // The grid sets IsBeingRemoved only while it removes the block itself
+            RemovedFromGrid = (Entity as MyCubeBlock)?.IsBeingRemoved == true && !MyEntities.IsClosingAll;
+            base.MarkForClose();
+        }
+
         public override void Close()
         {
             NeedsUpdate |= MyEntityUpdateEnum.NONE;
@@ -442,11 +460,21 @@ namespace Psycho.TradeLanes
                     //Block.PropertiesChanged -= Block_CustomDataChanged;
                     Block.CubeGridChanged -= Block_CubeGridChanged;
 
-                    // The clients drop their stand-in of this lane
                     if (TradeLaneNetwork.IsServer)
                     {
-                        HasTarget = false;
-                        SendLaneInfo();
+                        if (RemovedFromGrid)
+                            LaneRegistry.ComputerRemoved(Block.EntityId);
+                        else
+                            LaneRegistry.Unloaded(Block.EntityId);
+
+                        // The clients drop their stand-in of this lane. On a cluster a
+                        // close is usually a handover or an offline partition, and the
+                        // lane stays in the registry.
+                        if (RemovedFromGrid || !LaneRegistry.Active)
+                        {
+                            HasTarget = false;
+                            SendLaneInfo();
+                        }
                     }
                 }
 
@@ -970,6 +998,8 @@ namespace Psycho.TradeLanes
 
                 if (TargetBlock != null && TargetBlock.CustomName != Block.CustomName && TargetBlock.CustomData.ToLower().Contains(tlid.ToLower()))
                 {
+                    if (TradeLaneNetwork.IsServer)
+                        ReportToRegistry();
                     return;
                 }
 
@@ -986,7 +1016,10 @@ namespace Psycho.TradeLanes
                 }
 
                 if (TradeLaneNetwork.IsServer)
+                {
                     PublishLaneInfo();
+                    ReportToRegistry();
+                }
 
                 /*
                 if (TargetBlock != null && TargetLane1_Dummy == null)
@@ -2529,6 +2562,17 @@ namespace Psycho.TradeLanes
                 //var gridDockingFrame = LaneDataDict[gate].GridDockFrame;
                 //var gridPrepFrame = LaneDataDict[gate].GridPrepFrame;
 
+                // Gone, or another lane launched it: docking it on would drag it
+                // back here and pin it short of that lane's exit
+                if (grid.MarkedForClose || grid.GameLogic.GetAs<CustomGridLogic>()?.IsInTransit == true)
+                {
+                    LaneDataDict[gate].GridInWaitingLine = null;
+                    LaneDataDict[gate].GridMergeStage = 0;
+                    LaneDataDict[gate].GridDockFrame = 0;
+                    LaneDataDict[gate].GridPrepFrame = 0;
+                    return;
+                }
+
                 if (grid.DampenersEnabled)
                 {
                     OverrideThrusters(LaneDataDict[gate].GridInWaitingLine, Vector3D.Zero, true);
@@ -2759,6 +2803,10 @@ namespace Psycho.TradeLanes
                     }
 
                     if (grid.GameLogic.GetAs<CustomGridLogic>()?.IsInTransit == true)
+                        return;
+
+                    // Lane ends close together: the first computer docks it
+                    if (IsDockingAnywhere(grid))
                         return;
 
                     TradeLaneNetwork.Notify(grid, "Trade Lane | Request Docking", sender: grid.DisplayName);
@@ -4074,6 +4122,21 @@ namespace Psycho.TradeLanes
                 }
             }
 
+            return false;
+        }
+
+        // Server: true if a lane computer has this grid in its waiting line
+        static bool IsDockingAnywhere(MyCubeGrid grid)
+        {
+            foreach (var block in TradeLanes)
+            {
+                var logic = block.GameLogic?.GetAs<TradeLaneComputerBlockLogic>();
+                if (logic == null)
+                    continue;
+                foreach (var data in logic.LaneDataDict.Values)
+                    if (data.GridInWaitingLine == grid)
+                        return true;
+            }
             return false;
         }
 
@@ -5440,15 +5503,18 @@ namespace Psycho.TradeLanes
         }
 
         // Server side: where the lane leads. A Target: GPS in the Custom Data wins,
-        // then the paired computer if it is loaded, then where it was last seen.
+        // then the paired computer if it is loaded, then the partner the cluster's
+        // lane registry gives, then where the partner was last seen.
         private void UpdateTarget()
         {
             if (TargetBlock != null && (TargetBlock.MarkedForClose || TargetBlock.CubeGrid == null))
                 TargetBlock = null;
 
+            TargetFromGps = TargetFromRegistry = false;
             Vector3D gps;
-            if (ReadTargetGps(out gps))
+            if (ReadTargetGps(CustomData, out gps))
             {
+                TargetFromGps = true;
                 HasTarget = true;
                 TargetPosition = gps;
                 TargetGridPosition = gps;
@@ -5464,11 +5530,34 @@ namespace Psycho.TradeLanes
                 TargetPosition = TargetBlock.WorldMatrix.Translation;
                 TargetGridPosition = TargetBlock.CubeGrid.WorldMatrix.Translation;
                 TargetUp = TargetBlock.CubeGrid.WorldMatrix.Up;
-                StoreTarget(tlid);
+                StoreTarget(tlid, TargetBlock.EntityId);
+                return;
+            }
+
+            bool inherit;
+            var partner = LaneRegistry.Partner(Block.EntityId, tlid, out inherit);
+            if (partner != null)
+            {
+                HasTarget = TargetFromRegistry = true;
+                TargetPosition = partner.Vector(0);
+                TargetGridPosition = partner.Vector(3);
+                TargetUp = partner.Vector(4);
+                InhertiRotation = inherit;
+                StoreTarget(tlid, partner.Id);
                 return;
             }
 
             var stored = ModStore.Load<StoredTarget>(Block, StoredTargetKey);
+            if (stored != null && LaneRegistry.IsRemoved(stored.PartnerId))
+            {
+                // The partner was removed from its grid somewhere on the cluster
+                MyLog.Default.WriteLine(
+                    $"TradeLanes: computer {Block.EntityId} dropped its stored target, {stored.PartnerId} was removed"
+                );
+                ModStore.Save<StoredTarget>(Block, StoredTargetKey, null);
+                StoredTargetXml = null;
+                stored = null;
+            }
             HasTarget = stored != null && stored.Tlid == tlid;
             if (!HasTarget)
                 return;
@@ -5478,7 +5567,7 @@ namespace Psycho.TradeLanes
             InhertiRotation = stored.InheritRotation;
         }
 
-        void StoreTarget(string tlid)
+        void StoreTarget(string tlid, long partnerId)
         {
             var stored = new StoredTarget
             {
@@ -5487,6 +5576,7 @@ namespace Psycho.TradeLanes
                 GridPosition = TargetGridPosition,
                 Up = TargetUp,
                 InheritRotation = InhertiRotation,
+                PartnerId = partnerId,
             };
             var xml = MyAPIGateway.Utilities.SerializeToXML(stored);
             if (xml == StoredTargetXml)
@@ -5498,11 +5588,11 @@ namespace Psycho.TradeLanes
         // Target:GPS:name:x:y:z:... in the Custom Data, for a lane whose far end is
         // not loaded with this one. Best put last, the other keys are found by
         // substring.
-        bool ReadTargetGps(out Vector3D position)
+        public static bool ReadTargetGps(string customData, out Vector3D position)
         {
             position = Vector3D.Zero;
-            var prefix = TradeLaneTargetGpsKeyword + TradeLaneSeparator;
-            foreach (var line in CustomData.Split('\n'))
+            const string prefix = "Target:";
+            foreach (var line in (customData ?? "").Split('\n'))
             {
                 var trimmed = line.Trim();
                 if (!trimmed.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
@@ -5520,6 +5610,38 @@ namespace Psycho.TradeLanes
                 return true;
             }
             return false;
+        }
+
+        // Server side: tells the cluster's lane registry about this computer. On a
+        // single server nothing listens.
+        void ReportToRegistry()
+        {
+            var source = !HasTarget ? "none"
+                : TargetFromGps ? "Target GPS"
+                : TargetFromRegistry ? "lane registry"
+                : TargetBlock != null ? "loaded partner"
+                : "stored target";
+            if (source != TargetSource)
+            {
+                TargetSource = source;
+                MyLog.Default.WriteLine($"TradeLanes: computer {Block.EntityId} target from {source}");
+            }
+
+            var tlid = ReadCustomData(CustomData, TradeLaneIdKeyword, TradeLaneSeparator);
+            if (tlid == "ERROR" || Block.CubeGrid == null)
+                return;
+            LaneRegistry.Report(
+                LaneRegistry.Entry(
+                    Block.EntityId,
+                    Block.CubeGrid.EntityId,
+                    tlid,
+                    Block.WorldMatrix,
+                    Block.CubeGrid.WorldMatrix,
+                    CustomData,
+                    HasTarget && !TargetFromGps && !TargetFromRegistry,
+                    InhertiRotation
+                )
+            );
         }
 
         TradeLaneMessage LaneInfoMessage()
