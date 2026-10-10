@@ -2562,6 +2562,17 @@ namespace Psycho.TradeLanes
                 //var gridDockingFrame = LaneDataDict[gate].GridDockFrame;
                 //var gridPrepFrame = LaneDataDict[gate].GridPrepFrame;
 
+                // Gone, or another lane launched it: docking it on would drag it
+                // back here and pin it short of that lane's exit
+                if (grid.MarkedForClose || grid.GameLogic.GetAs<CustomGridLogic>()?.IsInTransit == true)
+                {
+                    LaneDataDict[gate].GridInWaitingLine = null;
+                    LaneDataDict[gate].GridMergeStage = 0;
+                    LaneDataDict[gate].GridDockFrame = 0;
+                    LaneDataDict[gate].GridPrepFrame = 0;
+                    return;
+                }
+
                 if (grid.DampenersEnabled)
                 {
                     OverrideThrusters(LaneDataDict[gate].GridInWaitingLine, Vector3D.Zero, true);
@@ -2792,6 +2803,10 @@ namespace Psycho.TradeLanes
                     }
 
                     if (grid.GameLogic.GetAs<CustomGridLogic>()?.IsInTransit == true)
+                        return;
+
+                    // Lane ends close together: the first computer docks it
+                    if (IsDockingAnywhere(grid))
                         return;
 
                     TradeLaneNetwork.Notify(grid, "Trade Lane | Request Docking", sender: grid.DisplayName);
@@ -4107,6 +4122,21 @@ namespace Psycho.TradeLanes
                 }
             }
 
+            return false;
+        }
+
+        // Server: true if a lane computer has this grid in its waiting line
+        static bool IsDockingAnywhere(MyCubeGrid grid)
+        {
+            foreach (var block in TradeLanes)
+            {
+                var logic = block.GameLogic?.GetAs<TradeLaneComputerBlockLogic>();
+                if (logic == null)
+                    continue;
+                foreach (var data in logic.LaneDataDict.Values)
+                    if (data.GridInWaitingLine == grid)
+                        return true;
+            }
             return false;
         }
 
